@@ -1,11 +1,15 @@
 use anyhow::{Context, Result, anyhow};
+use futures::StreamExt;
+use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
 use regex::Regex;
-use reqwest::header::{CONTENT_LENGTH, HeaderValue, RANGE};
-use reqwest::{self, IntoUrl};
-use reqwest::{StatusCode, Url};
+use reqwest::Url;
+use reqwest::header::CONTENT_LENGTH;
+use reqwest::{self};
+use std::fmt::format;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use tokio::{fs::File, io::AsyncWriteExt, task::JoinSet};
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 pub struct Downloader {
     urls: Vec<String>,
@@ -90,25 +94,81 @@ impl Downloader {
         url: &str,
         output: &PathBuf,
     ) -> Result<()> {
+        // Create progress bar for request
+        let pb = ProgressBar::new_spinner()
+            .with_message(format!("Requesting information about {}", url));
+        pb.enable_steady_tick(Duration::from_millis(100));
+
         let response = client
             .get(url)
             .send()
             .await
-            .with_context(|| format!("Failed to GET '{}'", url))?;
+            .with_context(|| format!("Failed to GET: '{}'", url))?;
 
-        let mut file = File::create(output)
+        pb.finish_and_clear();
+
+        // Checking the response status
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Request {} failed with status: {}",
+                url,
+                response.status()
+            ));
+        }
+
+        // Get file size from Content-Length header (if any)
+        let total_size = response
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|ct_len| ct_len.to_str().ok())
+            .and_then(|ct_len| ct_len.parse::<u64>().ok());
+
+        if let Some(total_size) = total_size {
+            println!("Size: {}", indicatif::HumanBytes(total_size));
+        }
+
+        let total_size = total_size.unwrap_or(10);
+
+        // Progress bar for download
+        let pb = ProgressBar::new(total_size);
+        pb.set_style(ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})")
+                        .context("Failed to set progress bar style")?
+                        .progress_chars("▓ ░"));
+
+        // pb.set_style(
+        //     ProgressStyle::default_bar()
+        //         .template("{spinner:.green} [{elapsed_precise}] {bytes} ({bytes_per_sec})")
+        //         .context("Failed to set progress bar style")?
+        //         .tick_chars("_>_>_>_>_>_>"),
+        // );
+
+        let mut file = tokio::fs::File::create(output)
             .await
-            .with_context(|| format!("Failed to create file '{}'", output.display()))?;
+            .with_context(|| format!("Failed to create file: {}", output.display()))?;
+        let mut writer = tokio::io::BufWriter::new(file);
 
-        let content = response
-            .bytes()
-            .await
-            .with_context(|| format!("Failed to get bytes from '{}'", url))?;
+        println!(
+            "Saving as: {}",
+            output.file_name().unwrap().to_str().unwrap()
+        );
 
-        file.write_all(&content)
-            .await
-            .with_context(|| format!("Failed to write to '{}'", output.display()))?;
+        // Get the data stream from the response
+        let mut downloaded: u64 = 0;
+        let mut stream = response.bytes_stream();
 
+        // Read the stream bit by bit and write it to a file
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("Failed to read chunk")?;
+            writer.write_all(&chunk).await?;
+
+            // Update progress bar
+            downloaded += chunk.len() as u64;
+            pb.set_position(downloaded % total_size);
+        }
+
+        writer.flush().await?;
+        pb.finish_with_message(format!("Download complete: {}", url));
         Ok(())
     }
 
@@ -141,67 +201,15 @@ impl Downloader {
     }
 }
 
-//     const CHUNK_SIZE: u64 = 8192;
-
-//     // Getting information about the file
-//     let response = client
-//         .head(url)
-//         .send()
-//         .await
-//         .context("Failed to send HEAD request")?;
-
-//     // Check support for partial requests
-//     if !response.headers().contains_key("accept-ranges") {
-//         return Err(anyhow::anyhow!("Server does not support partial content"));
-//     }
-
-//     // Get the length of the content
-//     let length = response
-//         .headers()
-//         .get(CONTENT_LENGTH)
-//         .context("Response doesn't include content length")?
-//         .to_str()
-//         .context("Invalid Content-Length header")?;
-//     let length = u64::from_str(length).context("Content-Length is not a valid number")?;
-
-//     // Create a file for writing
-//     let mut output_file = File::create(output)
-//         .await
-//         .context("Failed to create output file")?;
-
-//     println!("Starting download of {} bytes...", length);
-
-//     // Downloading the file in parts
-//     for range in PartialRangeIter::new(0, length, CHUNK_SIZE)? {
-
-//         let response = client
-//             .get(url)
-//             .header(RANGE, range)
-//             .send()
-//             .await
-//             .context("Failed to send GET request")?;
-
-//         match response.status() {
-//             StatusCode::OK | StatusCode::PARTIAL_CONTENT => {
-//                 let bytes = response
-//                     .bytes()
-//                     .await
-//                     .context("Failed to read response bytes")?;
-//                 output_file
-//                     .write_all(&bytes)
-//                     .context("Failed to write to file")?;
-//             }
-//             status => {
-//                 return Err(anyhow::anyhow!("Unexpected server response: {}", status));
-//             }
-//         }
-//     }
-
-//     Ok(())
-// }
-
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use bytes::Bytes;
+    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use reqwest::Client;
+    use warp::Filter;
+
     use super::*;
 
     #[test]
@@ -234,5 +242,92 @@ mod tests {
             Downloader::get_filename("https://example.com/page/1/?param=value#fragment"),
             "example_com_page_1_param_value_fragment"
         );
+    }
+
+    fn create_realistic_stream(
+        content: &'static [u8],
+        base_chunk_size: usize,
+    ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + 'static {
+        let rng = Arc::new(Mutex::new(StdRng::from_os_rng()));
+
+        futures::stream::iter(content.chunks(base_chunk_size).map(move |chunk| {
+            let rng = Arc::clone(&rng);
+
+            async move {
+                // Get random delay parameters
+                let (delay_ms, extra_delay) = {
+                    let mut rng = rng.lock().unwrap();
+                    (
+                        rng.random_range(50..500),
+                        if rng.random_ratio(1, 10) {
+                            rng.random_range(500..1000)
+                        } else {
+                            0
+                        },
+                    )
+                };
+
+                tokio::time::sleep(Duration::from_millis(delay_ms + extra_delay)).await;
+                Ok(Bytes::from(chunk))
+            }
+        }))
+        .buffered(3) // Parallel processing of chunks
+    }
+
+    #[tokio::test]
+    async fn test_download_with_content_length() {
+        test_download(true).await;
+    }
+
+    #[tokio::test]
+    async fn test_download_without_content_length() {
+        test_download(false).await;
+    }
+
+    async fn test_download(use_content_length: bool) {
+        let content = &[0u8; 1024];
+        let filename = "file.txt";
+        let chuck_size = 16;
+
+        let routes = warp::path(filename).map(move || {
+            let stream = create_realistic_stream(content, chuck_size);
+
+            let mut reply = warp::reply::Response::new(warp::hyper::Body::wrap_stream(stream));
+
+            if use_content_length {
+                reply.headers_mut().insert(
+                    warp::http::header::CONTENT_LENGTH,
+                    content.len().to_string().parse().unwrap(),
+                );
+            }
+
+            const RESPONSE_DELAY_MS: u64 = 3000;
+            std::thread::sleep(Duration::from_millis(RESPONSE_DELAY_MS)); // Response delay
+            reply
+        });
+
+        let (addr, server) = warp::serve(routes).bind_ephemeral(([127, 0, 0, 1], 0));
+
+        tokio::spawn(server);
+        tokio::time::sleep(Duration::from_millis(500)).await; // Waiting for the server to start up
+
+        let client = Client::new();
+        let url = format!("http://{}/{}", addr, filename);
+        let output = PathBuf::from(filename);
+
+        // Register the Ctrl+C handler for deleting the created file
+        ctrlc::try_set_handler({
+            let output = output.clone();
+            move || {
+                let _ = std::fs::remove_file(&output);
+                std::process::exit(0);
+            }
+        })
+        .ok();
+
+        let result = Downloader::download_file_async(&client, &url, &output).await;
+
+        assert!(result.is_ok(), "Download failed: {}", result.unwrap_err());
+        std::fs::remove_file(&output).ok();
     }
 }

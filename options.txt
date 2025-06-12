@@ -1,5 +1,0 @@
--s --silent
--v --version
--h --help
--f --force -o --overwrite
--r --resume
