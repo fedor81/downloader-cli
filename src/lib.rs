@@ -1,78 +1,75 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use futures::StreamExt;
-use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
-use reqwest::Url;
-use reqwest::header::CONTENT_LENGTH;
-use reqwest::{self};
-use std::fmt::format;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use reqwest::{self, Client};
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
+pub use builder::DownloaderBuilder;
+mod builder;
+
+#[derive(Debug, Clone)]
 pub struct Downloader {
-    urls: Vec<String>,
-    destination: PathBuf,
-    overwrite: bool,
+    tasks: Vec<DownloadTask>,
+    client: Client,
+}
+
+#[derive(Debug, Clone)]
+pub struct DownloadTask {
+    pub url: String,
+    pub output: PathBuf,
+    pub overwrite: bool,
 }
 
 impl Downloader {
-    /// Returns: Self and a vector of unvalidated URLs
-    pub fn build(urls: Vec<String>, destination: PathBuf) -> Result<(Self, Vec<anyhow::Error>)> {
-        let (urls, errors) = Downloader::validate_urls(urls);
-
-        if urls.is_empty() {
-            return Err(anyhow::anyhow!("No valid URLs provided"));
+    /// Creates a new downloader
+    pub fn new(client: Client) -> Self {
+        Self {
+            tasks: Vec::new(),
+            client,
         }
-
-        Ok((
-            Self {
-                urls,
-                destination,
-                overwrite: false,
-            },
-            errors,
-        ))
     }
 
-    /// Reads a list of URLs from a file separated by newlines
-    ///
-    /// Returns: Self and a vector of unvalidated URLs
-    pub fn from_file(path: &Path, destination: PathBuf) -> Result<(Self, Vec<anyhow::Error>)> {
-        let reader = BufReader::new(std::fs::File::open(path).unwrap());
-        Downloader::build(
-            reader.lines().map(|line| line.unwrap()).collect(),
-            destination,
-        )
+    pub fn builder() -> DownloaderBuilder {
+        DownloaderBuilder::new()
     }
 
-    pub async fn download_async(&self) -> Result<()> {
-        let client = reqwest::Client::new();
-        let mut tasks = tokio::task::JoinSet::new();
-        let mut errors = vec![];
+    /// Add a download task
+    pub fn add_task(&mut self, task: DownloadTask) {
+        self.tasks.push(task);
+    }
 
-        for url in self.urls.iter() {
-            let output = PathBuf::from(Downloader::get_filename(url));
-            let client = client.clone();
-            let url = url.clone();
-            tasks.spawn(
-                async move { Downloader::download_file_async(&client, &url, &output).await },
-            );
+    pub fn task_count(&self) -> usize {
+        self.tasks.len()
+    }
+
+    /// Downloads files with resume support
+    pub async fn resume_download(&self) -> Vec<anyhow::Error> {
+        todo!()
+    }
+
+    /// Downloads files asynchronously
+    pub async fn download_all(&self) -> Vec<anyhow::Error> {
+        let mut handles = tokio::task::JoinSet::new();
+        let mut errors = Vec::new();
+
+        for task in &self.tasks {
+            let client = self.client.clone();
+            let task = task.clone();
+            handles.spawn(async move { Self::download_file(&client, &task).await });
         }
 
-        while let Some(result) = tasks.join_next().await {
-            match result {
-                Ok(Ok(_)) => {} // Success download
-                Ok(Err(e)) => errors.push(format!("Download error: {}", e)),
-                Err(join_err) => errors.push(format!("Task failed: {}", join_err)),
+        while let Some(res) = handles.join_next().await {
+            match res {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => errors.push(e),
+                Err(join_err) => errors.push(anyhow::anyhow!("Task failed: {}", join_err)),
             }
         }
 
-        if !errors.is_empty() {
-            return Err(anyhow::anyhow!("Errors occurred:\n{}", errors.join("\n")));
-        }
-        Ok(())
+        errors
     }
 
     fn validate_urls(urls: Vec<String>) -> (Vec<String>, Vec<anyhow::Error>) {
@@ -80,20 +77,24 @@ impl Downloader {
         let mut errors = vec![];
 
         for url_string in urls {
-            match reqwest::Url::parse(&url_string) {
-                Ok(_) => valid_urls.push(url_string),
-                Err(e) => errors.push(e.into()),
+            if Self::is_valid_url(&url_string) {
+                valid_urls.push(url_string);
+            } else {
+                errors.push(anyhow::anyhow!("Can't parse url: {}", url_string));
             }
         }
 
         (valid_urls, errors)
     }
 
-    async fn download_file_async(
-        client: &reqwest::Client,
-        url: &str,
-        output: &PathBuf,
-    ) -> Result<()> {
+    pub fn is_valid_url(url: &str) -> bool {
+        reqwest::Url::parse(url).is_ok()
+    }
+
+    async fn download_file(client: &reqwest::Client, task: &DownloadTask) -> Result<()> {
+        let url = &task.url;
+        let output = &task.output;
+
         // Create progress bar for request
         let pb = ProgressBar::new_spinner()
             .with_message(format!("Requesting information about {}", url));
@@ -143,7 +144,23 @@ impl Downloader {
         //         .tick_chars("_>_>_>_>_>_>"),
         // );
 
-        let mut file = tokio::fs::File::create(output)
+        let output_display = output.display();
+
+        if std::fs::exists(output)
+            .with_context(|| format!("Can't check existence of file: {}", &output_display))?
+        {
+            if task.overwrite {
+                std::fs::remove_file(output)
+                    .with_context(|| format!("Can't remove file: {}", output_display))?;
+            } else {
+                return Err(anyhow::anyhow!(format!(
+                    "File exists: {}. See '--help' for solutions.",
+                    output_display
+                )));
+            }
+        }
+
+        let file = tokio::fs::File::create(output)
             .await
             .with_context(|| format!("Failed to create file: {}", output.display()))?;
         let mut writer = tokio::io::BufWriter::new(file);
@@ -173,7 +190,7 @@ impl Downloader {
     }
 
     /// Try to get the filename from the URL
-    fn get_filename(url: &str) -> String {
+    fn sanitize_filename(url: &str) -> String {
         const MAX_FILENAME_LENGTH: usize = 100;
 
         // Remove query and anchor parameters
@@ -207,7 +224,6 @@ mod tests {
 
     use bytes::Bytes;
     use rand::{Rng, SeedableRng, rngs::StdRng};
-    use reqwest::Client;
     use warp::Filter;
 
     use super::*;
@@ -215,31 +231,31 @@ mod tests {
     #[test]
     fn test_get_filename() {
         assert_eq!(
-            Downloader::get_filename("https://example.com/file.txt"),
+            Downloader::sanitize_filename("https://example.com/file.txt"),
             "file.txt"
         );
         assert_eq!(
-            Downloader::get_filename("https://example.com/file.txt?param=value"),
+            Downloader::sanitize_filename("https://example.com/file.txt?param=value"),
             "file.txt"
         );
         assert_eq!(
-            Downloader::get_filename("https://example.com/file.txt#fragment"),
+            Downloader::sanitize_filename("https://example.com/file.txt#fragment"),
             "file.txt"
         );
         assert_eq!(
-            Downloader::get_filename("https://example.com/file.txt?param=value#fragment"),
+            Downloader::sanitize_filename("https://example.com/file.txt?param=value#fragment"),
             "file.txt"
         );
         assert_eq!(
-            Downloader::get_filename("https://example.com/"),
+            Downloader::sanitize_filename("https://example.com/"),
             "example_com"
         );
         assert_eq!(
-            Downloader::get_filename("https://example.com/page/1/"),
+            Downloader::sanitize_filename("https://example.com/page/1/"),
             "example_com_page_1"
         );
         assert_eq!(
-            Downloader::get_filename("https://example.com/page/1/?param=value#fragment"),
+            Downloader::sanitize_filename("https://example.com/page/1/?param=value#fragment"),
             "example_com_page_1_param_value_fragment"
         );
     }
@@ -256,7 +272,7 @@ mod tests {
             async move {
                 // Get random delay parameters
                 let (delay_ms, extra_delay) = {
-                    let mut rng = rng.lock().unwrap();
+                    let mut rng = rng.lock().expect("Can't lock the Mutex(rng)");
                     (
                         rng.random_range(50..500),
                         if rng.random_ratio(1, 10) {
@@ -297,7 +313,7 @@ mod tests {
             if use_content_length {
                 reply.headers_mut().insert(
                     warp::http::header::CONTENT_LENGTH,
-                    content.len().to_string().parse().unwrap(),
+                    content.len().to_string().parse().expect("Can't parse"),
                 );
             }
 
@@ -325,7 +341,15 @@ mod tests {
         })
         .ok();
 
-        let result = Downloader::download_file_async(&client, &url, &output).await;
+        let result = Downloader::download_file(
+            &client,
+            &DownloadTask {
+                url,
+                output: output.clone(),
+                overwrite: true,
+            },
+        )
+        .await;
 
         assert!(result.is_ok(), "Download failed: {}", result.unwrap_err());
         std::fs::remove_file(&output).ok();
