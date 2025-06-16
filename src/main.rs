@@ -3,7 +3,10 @@ use std::{io::BufRead, path::PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use downloader_cli::{Downloader, DownloaderBuilder};
+use downloader_cli::{
+    Downloader, DownloaderBuilder,
+    config::{Config, load_config, load_config_from_path},
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -22,6 +25,10 @@ struct Cli {
     #[arg(short, long)]
     resume: bool,
 
+    /// Uses the config specified in the argument
+    #[arg(long)]
+    config: Option<String>,
+
     /// Overwrite if the file already exists
     #[arg(short, long)]
     force: bool,
@@ -35,6 +42,12 @@ async fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
     let destination = args.target.unwrap_or_else(|| ".".to_string());
     let destination = PathBuf::from(destination);
+
+    let config: Config = if let Some(config_path) = args.config {
+        load_config_from_path(&config_path)?
+    } else {
+        load_config()?
+    };
 
     let mut builder = Downloader::builder();
 

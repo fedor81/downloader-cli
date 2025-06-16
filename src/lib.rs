@@ -9,6 +9,7 @@ use tokio::io::AsyncWriteExt;
 
 pub use builder::DownloaderBuilder;
 mod builder;
+pub mod config;
 
 #[derive(Debug, Clone)]
 pub struct Downloader {
