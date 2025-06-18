@@ -1,28 +1,32 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
-use reqwest::{self, Client};
-use std::path::PathBuf;
-use std::time::Duration;
+use reqwest::{self, Client, Response};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 pub use builder::DownloaderBuilder;
+
+use crate::reporter::DownloadReporter;
 mod builder;
 pub mod config;
+pub mod reporter;
 
-#[derive(Debug, Clone)]
 pub struct Downloader {
     tasks: Vec<DownloadTask>,
     client: Client,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DownloadTask {
     pub url: String,
     pub output: PathBuf,
     pub overwrite: bool,
+    pub reporter: ThreadReporter,
 }
+
+pub type ThreadReporter = Arc<tokio::sync::Mutex<dyn DownloadReporter + Send>>;
 
 impl Downloader {
     /// Creates a new downloader
@@ -92,30 +96,35 @@ impl Downloader {
         reqwest::Url::parse(url).is_ok()
     }
 
-    async fn download_file(client: &reqwest::Client, task: &DownloadTask) -> Result<()> {
-        let url = &task.url;
-        let output = &task.output;
+    async fn download_file(client: &Client, task: &DownloadTask) -> Result<()> {
+        // Preparation
+        {
+            let mut reporter = task.reporter.lock().await;
+            reporter.on_request(&task.url);
+        }
 
-        // Create progress bar for request
-        let pb = ProgressBar::new_spinner()
-            .with_message(format!("Requesting information about {}", url));
-        pb.enable_steady_tick(Duration::from_millis(100));
-
-        let response = client
-            .get(url)
+        // Sending a request
+        let response = match client
+            .get(&task.url)
             .send()
             .await
-            .with_context(|| format!("Failed to GET: '{}'", url))?;
-
-        pb.finish_and_clear();
+            .with_context(|| format!("Failed to GET: '{}'", &task.url))
+        {
+            Ok(response) => {
+                task.reporter.lock().await.on_response(&response);
+                response
+            }
+            Err(e) => {
+                task.reporter.lock().await.on_error(&e);
+                return Err(e);
+            }
+        };
 
         // Checking the response status
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Request {} failed with status: {}",
-                url,
-                response.status()
-            ));
+            let err = anyhow::anyhow!("Request {} failed with status: {}", &task.url, response.status());
+            task.reporter.lock().await.on_error(&err);
+            return Err(err);
         }
 
         // Get file size from Content-Length header (if any)
@@ -125,69 +134,67 @@ impl Downloader {
             .and_then(|ct_len| ct_len.to_str().ok())
             .and_then(|ct_len| ct_len.parse::<u64>().ok());
 
-        if let Some(total_size) = total_size {
-            println!("Size: {}", indicatif::HumanBytes(total_size));
+        task.reporter.lock().await.on_file_size_known(total_size);
+
+        if Self::handle_existing_file(task).await? {
+            return Err(anyhow::anyhow!("File exists: {}", task.output.display())
+                .context("Use --overwrite to replace existing files"));
         }
 
-        let total_size = total_size.unwrap_or(10);
+        // Download
+        Self::download_stream(task, response).await?;
+        task.reporter.lock().await.on_complete(&task.url, &task.output);
+        Ok(())
+    }
 
-        // Progress bar for download
-        let pb = ProgressBar::new(total_size);
-        pb.set_style(ProgressStyle::default_bar()
-                        .template("{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})")
-                        .context("Failed to set progress bar style")?
-                        .progress_chars("▓ ░"));
-
-        // pb.set_style(
-        //     ProgressStyle::default_bar()
-        //         .template("{spinner:.green} [{elapsed_precise}] {bytes} ({bytes_per_sec})")
-        //         .context("Failed to set progress bar style")?
-        //         .tick_chars("_>_>_>_>_>_>"),
-        // );
-
-        let output_display = output.display();
-
-        if std::fs::exists(output)
-            .with_context(|| format!("Can't check existence of file: {}", &output_display))?
-        {
-            if task.overwrite {
-                std::fs::remove_file(output)
-                    .with_context(|| format!("Can't remove file: {}", output_display))?;
-            } else {
-                return Err(anyhow::anyhow!(format!(
-                    "File exists: {}. See '--help' for solutions.",
-                    output_display
-                )));
-            }
-        }
-
-        let file = tokio::fs::File::create(output)
+    /// Creates a new file and downloads the stream by calling callbacks
+    async fn download_stream(task: &DownloadTask, response: Response) -> Result<()> {
+        let file = tokio::fs::File::create(&task.output)
             .await
-            .with_context(|| format!("Failed to create file: {}", output.display()))?;
+            .with_context(|| format!("Failed to create file: {}", &task.output.display()))?;
         let mut writer = tokio::io::BufWriter::new(file);
-
-        println!(
-            "Saving as: {}",
-            output.file_name().unwrap().to_str().unwrap()
-        );
+        task.reporter.lock().await.on_file_create(&task.output);
 
         // Get the data stream from the response
-        let mut downloaded: u64 = 0;
         let mut stream = response.bytes_stream();
+        task.reporter.lock().await.on_start_download();
 
-        // Read the stream bit by bit and write it to a file
+        // Read the stream and write it to a file
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("Failed to read chunk")?;
+            let chunk = chunk.with_context(|| "Failed to read response chunk")?;
             writer.write_all(&chunk).await?;
-
-            // Update progress bar
-            downloaded += chunk.len() as u64;
-            pb.set_position(downloaded % total_size);
+            task.reporter.lock().await.on_progress(chunk.len() as u64);
         }
 
         writer.flush().await?;
-        pb.finish_with_message(format!("Download complete: {}", url));
         Ok(())
+    }
+
+    /// Checks the existence of a file and whether it can be written to.
+    ///
+    /// Returns `false` if the file exists and can be overwritten, and `true` otherwise.
+    async fn handle_existing_file(task: &DownloadTask) -> Result<bool> {
+        let output_display = task.output.display();
+        Ok(
+            if tokio::fs::try_exists(&task.output)
+                .await
+                .with_context(|| format!("Failed to check file existence: {}", task.output.display()))?
+            {
+                let mut reporter = task.reporter.lock().await;
+                reporter.on_file_exists(&task.output, task.overwrite);
+
+                if task.overwrite {
+                    tokio::fs::remove_file(&task.output).await.with_context(|| {
+                        format!("Failed to remove existing file: {}", task.output.display())
+                    })?;
+                    false
+                } else {
+                    true
+                }
+            } else {
+                false
+            },
+        )
     }
 
     /// Try to get the filename from the URL
@@ -221,11 +228,16 @@ impl Downloader {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use bytes::Bytes;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use warp::Filter;
+
+    use crate::reporter::ConsoleReporter;
 
     use super::*;
 
@@ -348,6 +360,7 @@ mod tests {
                 url,
                 output: output.clone(),
                 overwrite: true,
+                reporter: Arc::from(tokio::sync::Mutex::new(ConsoleReporter::new())),
             },
         )
         .await;

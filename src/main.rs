@@ -1,4 +1,4 @@
-use std::{io::BufRead, path::PathBuf};
+use std::{io::BufRead, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -6,7 +6,9 @@ use clap::Parser;
 use downloader_cli::{
     Downloader, DownloaderBuilder,
     config::{Config, load_config, load_config_from_path},
+    reporter::ConsoleReporter,
 };
+use tokio::sync::Mutex;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -94,21 +96,30 @@ fn process_source(
     overwrite: bool,
 ) -> anyhow::Result<()> {
     if Downloader::is_valid_url(source) {
-        builder.add_task(source, destination, overwrite);
+        builder.add_task(
+            source,
+            destination,
+            overwrite,
+            Arc::from(Mutex::new(ConsoleReporter::new())),
+        );
         Ok(())
     } else {
         // Reads a list of URLs from a file separated by newlines
-        let file = std::fs::File::open(source)
-            .with_context(|| format!("Failed to open source file: {}", source))?;
+        let file =
+            std::fs::File::open(source).with_context(|| format!("Failed to open source file: {}", source))?;
 
         let reader = std::io::BufReader::new(file);
         for (line_num, line) in reader.lines().enumerate() {
-            let url = line.with_context(|| {
-                format!("Failed to read line {} from source file", line_num + 1)
-            })?;
+            let url =
+                line.with_context(|| format!("Failed to read line {} from source file", line_num + 1))?;
 
             if !url.trim().is_empty() {
-                builder.add_task(&url, destination, overwrite);
+                builder.add_task(
+                    &url,
+                    destination,
+                    overwrite,
+                    Arc::from(Mutex::new(ConsoleReporter::new())),
+                );
             }
         }
         Ok(())

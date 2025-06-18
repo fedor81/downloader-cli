@@ -3,6 +3,8 @@ use std::path::Path;
 use anyhow::Result;
 use reqwest::Client;
 
+use crate::ThreadReporter;
+
 use super::{DownloadTask, Downloader};
 
 /// A builder for convenient construction
@@ -26,11 +28,18 @@ impl DownloaderBuilder {
     }
 
     /// Adds a download task
-    pub fn add_task(&mut self, url: &str, output: impl AsRef<Path>, overwrite: bool) -> &mut Self {
+    pub fn add_task(
+        &mut self,
+        url: &str,
+        output: impl AsRef<Path>,
+        overwrite: bool,
+        reporter: ThreadReporter,
+    ) -> &mut Self {
         self.tasks.push(DownloadTask {
             url: url.to_string(),
             output: output.as_ref().to_path_buf(),
             overwrite,
+            reporter,
         });
         self
     }
