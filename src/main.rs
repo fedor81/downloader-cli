@@ -6,7 +6,7 @@ use clap::Parser;
 use downloader_cli::{
     Downloader, DownloaderBuilder,
     config::{Config, load_config, load_config_from_path},
-    reporter::ConsoleReporter,
+    reporter::{ConsoleReporter, ConsoleReporterFactory},
 };
 use tokio::sync::Mutex;
 
@@ -95,12 +95,14 @@ fn process_source(
     destination: &PathBuf,
     overwrite: bool,
 ) -> anyhow::Result<()> {
+    let reporter_factory = ConsoleReporterFactory::new();
+
     if Downloader::is_valid_url(source) {
         builder.add_task(
             source,
             destination,
             overwrite,
-            Arc::from(Mutex::new(ConsoleReporter::new())),
+            Arc::from(Mutex::new(reporter_factory.create())),
         );
         Ok(())
     } else {
@@ -118,7 +120,7 @@ fn process_source(
                     &url,
                     destination,
                     overwrite,
-                    Arc::from(Mutex::new(ConsoleReporter::new())),
+                    Arc::from(Mutex::new(reporter_factory.create())),
                 );
             }
         }

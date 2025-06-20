@@ -1,9 +1,10 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
 use reqwest::Client;
+use tokio::sync::Mutex;
 
-use crate::ThreadReporter;
+use crate::reporter::DownloadReporter;
 
 use super::{DownloadTask, Downloader};
 
@@ -33,7 +34,7 @@ impl DownloaderBuilder {
         url: &str,
         output: impl AsRef<Path>,
         overwrite: bool,
-        reporter: ThreadReporter,
+        reporter: Arc<Mutex<dyn DownloadReporter>>,
     ) -> &mut Self {
         self.tasks.push(DownloadTask {
             url: url.to_string(),

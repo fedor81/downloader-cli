@@ -5,6 +5,7 @@ use reqwest::{self, Client, Response};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 pub use builder::DownloaderBuilder;
 
@@ -23,10 +24,8 @@ pub struct DownloadTask {
     pub url: String,
     pub output: PathBuf,
     pub overwrite: bool,
-    pub reporter: ThreadReporter,
+    pub reporter: Arc<Mutex<dyn DownloadReporter>>, // TODO: Option<...>
 }
-
-pub type ThreadReporter = Arc<tokio::sync::Mutex<dyn DownloadReporter + Send>>;
 
 impl Downloader {
     /// Creates a new downloader
@@ -156,8 +155,11 @@ impl Downloader {
         task.reporter.lock().await.on_file_create(&task.output);
 
         // Get the data stream from the response
+        task.reporter
+            .lock()
+            .await
+            .on_start_download(response.url().as_str(), &task.output);
         let mut stream = response.bytes_stream();
-        task.reporter.lock().await.on_start_download();
 
         // Read the stream and write it to a file
         while let Some(chunk) = stream.next().await {
@@ -228,16 +230,17 @@ impl Downloader {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
+    use std::{result, sync::Arc, time::Duration};
 
     use bytes::Bytes;
     use rand::{Rng, SeedableRng, rngs::StdRng};
-    use warp::Filter;
+    use warp::{
+        Filter,
+        reject::{Reject, Rejection},
+        reply::Reply,
+    };
 
-    use crate::reporter::ConsoleReporter;
+    use crate::reporter::{ConsoleReporter, ConsoleReporterFactory};
 
     use super::*;
 
@@ -277,7 +280,7 @@ mod tests {
         content: &'static [u8],
         base_chunk_size: usize,
     ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> + 'static {
-        let rng = Arc::new(Mutex::new(StdRng::from_os_rng()));
+        let rng = Arc::new(std::sync::Mutex::new(StdRng::from_os_rng()));
 
         futures::stream::iter(content.chunks(base_chunk_size).map(move |chunk| {
             let rng = Arc::clone(&rng);
@@ -303,69 +306,71 @@ mod tests {
         .buffered(3) // Parallel processing of chunks
     }
 
-    #[tokio::test]
-    async fn test_download_with_content_length() {
-        test_download(true).await;
+    fn create_response(content: &'static [u8], use_content_length: bool) -> warp::reply::Response {
+        let chunk_size = rand::random_range(10..20);
+        let response_delay = Duration::from_millis(rand::random_range(500..5000));
+
+        let stream = create_realistic_stream(content, chunk_size);
+        let mut reply = warp::reply::Response::new(warp::hyper::Body::wrap_stream(stream));
+
+        if use_content_length {
+            reply.headers_mut().insert(
+                warp::http::header::CONTENT_LENGTH,
+                content.len().to_string().parse().expect("can't parse"),
+            );
+        }
+
+        std::thread::sleep(response_delay); // response delay
+        reply
     }
 
     #[tokio::test]
-    async fn test_download_without_content_length() {
-        test_download(false).await;
-    }
+    async fn test_download() {
+        let use_content_length = true;
+        let content = &[1u8; 1024];
+        let filenames = ["file.txt", "test.txt", "error.txt", "super.txt"];
 
-    async fn test_download(use_content_length: bool) {
-        let content = &[0u8; 1024];
-        let filename = "file.txt";
-        let chuck_size = 16;
-
-        let routes = warp::path(filename).map(move || {
-            let stream = create_realistic_stream(content, chuck_size);
-
-            let mut reply = warp::reply::Response::new(warp::hyper::Body::wrap_stream(stream));
-
-            if use_content_length {
-                reply.headers_mut().insert(
-                    warp::http::header::CONTENT_LENGTH,
-                    content.len().to_string().parse().expect("Can't parse"),
-                );
-            }
-
-            const RESPONSE_DELAY_MS: u64 = 3000;
-            std::thread::sleep(Duration::from_millis(RESPONSE_DELAY_MS)); // Response delay
-            reply
-        });
+        let routes = warp::path(filenames[0])
+            .map(move || create_response(content, use_content_length))
+            .or(warp::path(filenames[1]).map(move || create_response(content, use_content_length)))
+            .or(warp::path(filenames[2]).map(move || create_response(content, use_content_length)))
+            .or(warp::path(filenames[3]).map(move || create_response(content, use_content_length)));
 
         let (addr, server) = warp::serve(routes).bind_ephemeral(([127, 0, 0, 1], 0));
-
         tokio::spawn(server);
-        tokio::time::sleep(Duration::from_millis(500)).await; // Waiting for the server to start up
 
-        let client = Client::new();
-        let url = format!("http://{}/{}", addr, filename);
-        let output = PathBuf::from(filename);
+        let mut builder = Downloader::builder();
+        let reporter_factory = ConsoleReporterFactory::new();
+
+        for file in filenames {
+            let url = format!("http://{}/{}", addr, file);
+            let output = PathBuf::from(file);
+            builder.add_task(
+                &url,
+                output,
+                false,
+                Arc::new(Mutex::new(reporter_factory.create())),
+            );
+        }
 
         // Register the Ctrl+C handler for deleting the created file
         ctrlc::try_set_handler({
-            let output = output.clone();
             move || {
-                let _ = std::fs::remove_file(&output);
+                for file in filenames {
+                    std::fs::remove_file(&file).ok();
+                }
                 std::process::exit(0);
             }
         })
         .ok();
 
-        let result = Downloader::download_file(
-            &client,
-            &DownloadTask {
-                url,
-                output: output.clone(),
-                overwrite: true,
-                reporter: Arc::from(tokio::sync::Mutex::new(ConsoleReporter::new())),
-            },
-        )
-        .await;
+        let (downloader, errors) = builder.build().unwrap();
+        let result = downloader.download_all().await;
 
-        assert!(result.is_ok(), "Download failed: {}", result.unwrap_err());
-        std::fs::remove_file(&output).ok();
+        assert_eq!(result.len(), 0, "Download failed: {:#?}", result);
+
+        for file in filenames {
+            std::fs::remove_file(&file).ok();
+        }
     }
 }
