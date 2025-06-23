@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 pub use builder::DownloaderBuilder;
 
 use crate::reporter::DownloadReporter;
+
 mod builder;
 pub mod config;
 pub mod reporter;
@@ -25,6 +26,21 @@ pub struct DownloadTask {
     pub output: PathBuf,
     pub overwrite: bool,
     pub reporter: Arc<Mutex<dyn DownloadReporter>>, // TODO: Option<...>
+}
+
+#[derive(Debug)]
+pub struct DownloadResult {
+    pub total: usize,
+    pub errors: Vec<anyhow::Error>,
+}
+
+impl DownloadResult {
+    fn new(total: usize) -> Self {
+        Self {
+            total,
+            errors: Vec::new(),
+        }
+    }
 }
 
 impl Downloader {
@@ -50,14 +66,14 @@ impl Downloader {
     }
 
     /// Downloads files with resume support
-    pub async fn resume_download(&self) -> Vec<anyhow::Error> {
+    pub async fn resume_download(&self) -> DownloadResult {
         todo!()
     }
 
     /// Downloads files asynchronously
-    pub async fn download_all(&self) -> Vec<anyhow::Error> {
+    pub async fn download_all(&self) -> DownloadResult {
         let mut handles = tokio::task::JoinSet::new();
-        let mut errors = Vec::new();
+        let mut result = DownloadResult::new(self.task_count());
 
         for task in &self.tasks {
             let client = self.client.clone();
@@ -68,12 +84,12 @@ impl Downloader {
         while let Some(res) = handles.join_next().await {
             match res {
                 Ok(Ok(_)) => {}
-                Ok(Err(e)) => errors.push(e),
-                Err(join_err) => errors.push(anyhow::anyhow!("Task failed: {}", join_err)),
+                Ok(Err(e)) => result.errors.push(e),
+                Err(join_err) => result.errors.push(anyhow::anyhow!("Task failed: {}", join_err)),
             }
         }
 
-        errors
+        result
     }
 
     fn validate_urls(urls: Vec<String>) -> (Vec<String>, Vec<anyhow::Error>) {
@@ -230,17 +246,13 @@ impl Downloader {
 
 #[cfg(test)]
 mod tests {
-    use std::{result, sync::Arc, time::Duration};
+    use std::{ops::Deref, sync::Arc, time::Duration};
 
     use bytes::Bytes;
     use rand::{Rng, SeedableRng, rngs::StdRng};
-    use warp::{
-        Filter,
-        reject::{Reject, Rejection},
-        reply::Reply,
-    };
+    use warp::Filter;
 
-    use crate::reporter::{ConsoleReporter, ConsoleReporterFactory};
+    use crate::reporter::{ConsoleReporterFactory, ReporterFactory};
 
     use super::*;
 
@@ -308,7 +320,7 @@ mod tests {
 
     fn create_response(content: &'static [u8], use_content_length: bool) -> warp::reply::Response {
         let chunk_size = rand::random_range(10..20);
-        let response_delay = Duration::from_millis(rand::random_range(500..5000));
+        let response_delay = Duration::from_millis(rand::random_range(500..3000));
 
         let stream = create_realistic_stream(content, chunk_size);
         let mut reply = warp::reply::Response::new(warp::hyper::Body::wrap_stream(stream));
@@ -328,13 +340,20 @@ mod tests {
     async fn test_download() {
         let use_content_length = true;
         let content = &[1u8; 1024];
-        let filenames = ["file.txt", "test.txt", "error.txt", "super.txt"];
+        let filenames = [
+            "file.txt",
+            "test.txt",
+            "error.txt",
+            "super.txt",
+            "a_very_long_name_for_the_download_file_for_the_test.txt",
+        ];
 
         let routes = warp::path(filenames[0])
             .map(move || create_response(content, use_content_length))
             .or(warp::path(filenames[1]).map(move || create_response(content, use_content_length)))
             .or(warp::path(filenames[2]).map(move || create_response(content, use_content_length)))
-            .or(warp::path(filenames[3]).map(move || create_response(content, use_content_length)));
+            .or(warp::path(filenames[3]).map(move || create_response(content, use_content_length)))
+            .or(warp::path(filenames[4]).map(move || create_response(content, use_content_length)));
 
         let (addr, server) = warp::serve(routes).bind_ephemeral(([127, 0, 0, 1], 0));
         tokio::spawn(server);
@@ -367,7 +386,7 @@ mod tests {
         let (downloader, errors) = builder.build().unwrap();
         let result = downloader.download_all().await;
 
-        assert_eq!(result.len(), 0, "Download failed: {:#?}", result);
+        assert_eq!(result.errors.len(), 0, "Download failed: {:#?}", result);
 
         for file in filenames {
             std::fs::remove_file(&file).ok();

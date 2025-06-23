@@ -2,101 +2,108 @@ use std::{io::BufRead, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-
-use downloader_cli::{
-    Downloader, DownloaderBuilder,
-    config::{Config, load_config, load_config_from_path},
-    reporter::{ConsoleReporter, ConsoleReporterFactory},
-};
 use tokio::sync::Mutex;
 
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-struct Cli {
-    /// URL
-    source: String,
-
-    /// Target filepath (existing directories will be treated as the target location)
-    target: Option<String>,
-
-    /// Silent mode
-    #[arg(short, long)]
-    silent: bool,
-
-    /// Resume failed or cancelled download (partial sanity check)
-    #[arg(short, long)]
-    resume: bool,
-
-    /// Uses the config specified in the argument
-    #[arg(long)]
-    config: Option<String>,
-
-    /// Overwrite if the file already exists
-    #[arg(short, long)]
-    force: bool,
-    //
-    // UI
-    //
-}
+use downloader_cli::{
+    DownloadResult, Downloader, DownloaderBuilder,
+    config::{AppConfig, CliConfig, IntoOverwrite, LogLevel},
+    reporter::{ConsoleReporterFactory, DownloadReporter, ReporterFactory},
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Cli::parse();
-    let destination = args.target.unwrap_or_else(|| ".".to_string());
-    let destination = PathBuf::from(destination);
+    let args = CliConfig::parse();
+    let mut config = load_config(&args)?;
+    args.into_overwrite(&mut config);
 
-    let config: Config = if let Some(config_path) = args.config {
-        load_config_from_path(&config_path)?
-    } else {
-        load_config()?
-    };
+    // Initializing the reporter based on the config
+    let reporter_factory = ConsoleReporterFactory::from_config(&config);
 
-    let mut builder = Downloader::builder();
-
-    // Processing the source (URL or file)
-    process_source(&args.source, &mut builder, &destination, args.force)?;
-
-    // Building a downloader and handling validation errors
-    let (downloader, validation_errors) = builder.build()?;
-    if !validation_errors.is_empty() {
-        print_errors("Validation errors", validation_errors, !args.silent);
-    }
+    let downloader = build_downloader(&args, &config, reporter_factory)?;
 
     // Performing the download
-    let download_errors = if args.resume {
+    let result = execute_download(&args, downloader).await;
+
+    handle_result(result, &config)
+}
+
+async fn execute_download(args: &CliConfig, downloader: Downloader) -> DownloadResult {
+    if args.resume {
         downloader.resume_download().await
     } else {
         downloader.download_all().await
-    };
+    }
+}
 
-    // Handling download errors
-    if !download_errors.is_empty() {
-        let errors_count = download_errors.len();
-        print_errors("Download errors", download_errors, !args.silent);
+fn handle_result(result: DownloadResult, config: &AppConfig) -> anyhow::Result<()> {
+    if !result.errors.is_empty() {
+        print_errors("Download errors", &result.errors, config.general.log_level);
 
-        if !args.silent {
-            let success_count = downloader.task_count() - errors_count;
+        if config.general.log_level.show_summary() {
+            let success_count = result.total - result.errors.len();
             println!("\nSuccessfully downloaded {} files", success_count);
         }
         anyhow::bail!("Some downloads failed");
     }
 
-    if !args.silent {
+    if config.general.log_level.show_success() {
         println!("\nAll files downloaded successfully!");
     }
 
     Ok(())
 }
 
+fn build_downloader<F>(args: &CliConfig, config: &AppConfig, factory: F) -> Result<Downloader>
+where
+    F: ReporterFactory + Send + Sync + 'static,
+    F::Reporter: DownloadReporter + Send + Sync + 'static,
+{
+    let destination = args
+        .target
+        .clone()
+        .or_else(|| config.download.download_dir.clone())
+        .unwrap_or_else(|| ".".into());
+    let destination = PathBuf::from(destination);
+
+    let mut builder = Downloader::builder()
+        .with_timeout(config.download.timeout_secs)
+        .with_retries(config.download.retries);
+
+    // Processing the source (URL or file)
+    let builder = process_source(&args.source, builder, factory, &destination, args.force)?;
+
+    // Building a downloader and handling validation errors
+    let (downloader, validation_errors) = builder.build()?;
+    if !validation_errors.is_empty() {
+        print_errors("Validation errors", &validation_errors, config.general.log_level);
+    }
+
+    Ok(downloader)
+}
+
+fn load_config(args: &CliConfig) -> anyhow::Result<AppConfig> {
+    let mut config = if let Some(config_path) = &args.config {
+        AppConfig::load_from_path(config_path)?
+    } else {
+        AppConfig::load()?
+    };
+
+    args.into_overwrite(&mut config);
+    Ok(config)
+}
+
 /// Processes the source (URL or file)
-fn process_source(
+fn process_source<F>(
     source: &str,
-    builder: &mut DownloaderBuilder,
+    mut builder: DownloaderBuilder,
+    reporter_factory: F,
     destination: &PathBuf,
     overwrite: bool,
-) -> anyhow::Result<()> {
-    let reporter_factory = ConsoleReporterFactory::new();
-
+) -> anyhow::Result<DownloaderBuilder>
+where
+    F: ReporterFactory + Send + Sync + 'static,
+    F::Reporter: DownloadReporter + Send + Sync + 'static,
+{
     if Downloader::is_valid_url(source) {
         builder.add_task(
             source,
@@ -104,7 +111,6 @@ fn process_source(
             overwrite,
             Arc::from(Mutex::new(reporter_factory.create())),
         );
-        Ok(())
     } else {
         // Reads a list of URLs from a file separated by newlines
         let file =
@@ -124,13 +130,13 @@ fn process_source(
                 );
             }
         }
-        Ok(())
     }
+    Ok(builder)
 }
 
 /// Prints errors based on silent mode
-fn print_errors(title: &str, errors: Vec<anyhow::Error>, show_errors: bool) {
-    if errors.is_empty() || !show_errors {
+fn print_errors(title: &str, errors: &[anyhow::Error], log_level: LogLevel) {
+    if errors.is_empty() || !log_level.show_errors() {
         return;
     }
 

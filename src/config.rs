@@ -7,11 +7,12 @@ use anyhow::{Context, Result};
 use directories::{BaseDirs, ProjectDirs};
 use serde::Deserialize;
 
-// It is possible to have multiple configs in the ~/.config/dw/ folder
+mod cli;
+pub use cli::{CliConfig, IntoOverwrite};
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
-pub struct Config {
+pub struct AppConfig {
     #[serde(default)]
     pub general: GeneralConfig,
 
@@ -25,19 +26,34 @@ pub struct Config {
     pub output: OutputConfig,
 }
 
+impl AppConfig {
+    /// It attempts to load the configuration from the default locations.
+    /// If it fails, it returns the default configuration.
+    pub fn load() -> Result<Self> {
+        let config: AppConfig = load_config()?;
+        config.validate()
+    }
+
+    pub fn load_from_path<P>(config_path: P) -> Result<Self>
+    where
+        P: AsRef<Path> + std::fmt::Debug,
+    {
+        let config: AppConfig = load_config_from_path(config_path)?;
+        config.validate()
+    }
+
+    fn validate(self) -> Result<Self> {
+        todo!()
+    }
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct GeneralConfig {
-    #[serde(default)]
-    pub silent: bool,
-
     #[serde(default)]
     pub log_level: LogLevel,
 
     #[serde(default)]
     pub config_path: Option<PathBuf>, // TODO
-
-    #[serde(default)]
-    pub force: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,10 +65,7 @@ pub struct DownloadConfig {
     pub retries: u8,
 
     #[serde(default)]
-    pub default_dir: Option<PathBuf>,
-
-    #[serde(default = "default_true")]
-    pub resume: bool,
+    pub download_dir: Option<String>,
 }
 
 impl DownloadConfig {
@@ -68,8 +81,7 @@ impl Default for DownloadConfig {
         Self {
             timeout_secs: Self::default_timeout(),
             retries: Self::default_retries(),
-            default_dir: Default::default(),
-            resume: default_true(),
+            download_dir: Default::default(),
         }
     }
 }
@@ -79,7 +91,21 @@ pub enum LogLevel {
     All,
     ErrorsOnly,
     ProgressBarOnly,
-    // Any other levels
+    Silent,
+}
+
+impl LogLevel {
+    pub fn show_summary(self) -> bool {
+        self == LogLevel::All
+    }
+
+    pub fn show_success(self) -> bool {
+        self == LogLevel::All
+    }
+
+    pub fn show_errors(self) -> bool {
+        self == LogLevel::All || self == LogLevel::ErrorsOnly
+    }
 }
 
 impl Default for LogLevel {
@@ -91,25 +117,52 @@ impl Default for LogLevel {
 #[derive(Debug, Deserialize)]
 pub struct ProgressBarConfig {
     #[serde(default = "default_true")]
-    pub enabled: bool,
+    pub enable: bool,
 
-    #[serde(default)]
+    #[serde(default = "ProgressBarConfig::default_progress_bar_template")]
+    pub progress_bar_template: Option<Vec<String>>,
+
+    #[serde(default = "ProgressBarConfig::default_progress_bar_symbols")]
     pub progress_bar_symbols: Option<Vec<String>>,
 
-    #[serde(default)]
-    pub progress_bar_template: Option<String>,
+    #[serde(default = "ProgressBarConfig::default_spinner_template")]
+    pub spinner_template: Option<Vec<String>>,
 
-    #[serde(default)]
+    #[serde(default = "ProgressBarConfig::default_spinner_symbols")]
     pub spinner_symbols: Option<Vec<String>>,
+}
+
+impl ProgressBarConfig {
+    pub fn default_progress_bar_template() -> Option<Vec<String>> {
+        Some(vec![
+            "{spinner:.green} {msg} [{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})"
+                .to_string(),
+        ])
+    }
+
+    pub fn default_progress_bar_symbols() -> Option<Vec<String>> {
+        Some(vec!["▓ ░".to_string()])
+    }
+
+    pub fn default_spinner_template() -> Option<Vec<String>> {
+        Some(vec![
+            "{spinner:.green} {msg} [{elapsed_precise}] {bytes} ({bytes_per_sec})".to_string(),
+        ])
+    }
+
+    pub fn default_spinner_symbols() -> Option<Vec<String>> {
+        Some(vec!["⠁⠂⠄⡀⢀⠠⠐⠈⠘⠰⠔⠑⠊ ".to_string()]) // ▉▊▋▌▍▎▏▎▍▌▋▊▉ 🕐🕑🕒🕓🕔🕕🕖🕗🕘🕙🕚🕛
+    }
 }
 
 impl Default for ProgressBarConfig {
     fn default() -> Self {
         Self {
-            enabled: default_true(),
-            progress_bar_template: Default::default(),
-            spinner_symbols: Default::default(),
-            progress_bar_symbols: Default::default(),
+            enable: default_true(),
+            progress_bar_template: Self::default_progress_bar_template(),
+            progress_bar_symbols: Self::default_progress_bar_symbols(),
+            spinner_template: Self::default_progress_bar_template(),
+            spinner_symbols: Self::default_spinner_symbols(),
         }
     }
 }
@@ -132,8 +185,11 @@ pub struct OutputConfig {
 #[rustfmt::skip]
 fn default_true() -> bool { true }
 
+#[rustfmt::skip]
+fn default_false() -> bool { false }
+
 /// Searches the config in several standard locations
-pub fn find_config() -> Result<Option<PathBuf>> {
+fn find_config() -> Result<Option<PathBuf>> {
     // Checking the existence of files
     for path in get_config_paths() {
         if path.exists() {
@@ -148,6 +204,8 @@ pub fn find_config() -> Result<Option<PathBuf>> {
 ///
 /// 1. Path specified in `DW_CONFIG_PATH` environment variable
 /// 2. User configs `~/.config/dw.toml`, `~/.config/dw/config.toml`, `~/.dw.toml`
+///
+/// It is possible to have multiple configs in the ~/.config/dw/ folder
 fn get_config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
@@ -219,20 +277,21 @@ fn get_config_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// Loads config from the first location found
-pub fn load_config<T>() -> Result<T>
+/// Loads config from the first location found.
+/// Return the default config if the file is not found.
+fn load_config<T>() -> Result<T>
 where
     T: serde::de::DeserializeOwned + Default,
 {
     if let Some(config_path) = find_config()? {
         load_config_from_path(config_path)
     } else {
-        Ok(T::default()) // Return the default config if the file is not found
+        Ok(T::default())
     }
 }
 
 /// Loads the config from the specified location
-pub fn load_config_from_path<T, P>(config_path: P) -> Result<T>
+fn load_config_from_path<T, P>(config_path: P) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
     P: AsRef<Path> + std::fmt::Debug,
@@ -251,6 +310,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_default_path() {
+        println!("{:#?}", get_config_paths());
+    }
+
+    #[test]
     fn test_custom_config_values() {
         let config_str = r#"
         [general]
@@ -259,36 +323,27 @@ mod tests {
 
         [download]
         timeout_secs = 60
-        default_dir = "/custom/path"
+        download_dir = "/custom/path"
     "#;
 
-        let config: Config = toml::from_str(config_str).unwrap();
+        let config: AppConfig = toml::from_str(config_str).unwrap();
 
-        assert!(config.general.silent);
         assert_eq!(config.general.log_level, LogLevel::ErrorsOnly);
         assert_eq!(config.download.timeout_secs, 60);
-        assert_eq!(
-            config.download.default_dir,
-            Some(PathBuf::from("/custom/path"))
-        );
+        assert_eq!(config.download.download_dir, Some("/custom/path".to_string()));
         assert_eq!(config.download.retries, 3);
     }
 
     #[test]
     fn test_invalid_config() {
         let config = "invalid_field = 42";
-        let actual = toml::from_str::<Config>(config);
+        let actual = toml::from_str::<AppConfig>(config);
         assert!(actual.is_err(), "{:#?}", actual);
     }
 
     #[test]
     fn test_default_config() {
-        let config: Config = toml::from_str("").unwrap();
+        let config: AppConfig = toml::from_str("").unwrap();
         println!("Config: {:#?}", config);
-    }
-
-    #[test]
-    fn test_default_path() {
-        println!("{:#?}", get_config_paths());
     }
 }

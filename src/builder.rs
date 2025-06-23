@@ -28,6 +28,14 @@ impl DownloaderBuilder {
         self
     }
 
+    pub fn with_timeout(self, timeout: u64) -> Self {
+        todo!()
+    }
+
+    pub fn with_retries(self, retries: u8) -> Self {
+        todo!()
+    }
+
     /// Adds a download task
     pub fn add_task(
         &mut self,
