@@ -1,10 +1,17 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::Result;
-use reqwest::Client;
-use tokio::sync::Mutex;
+use reqwest::{Client, ClientBuilder};
+use tokio::sync::{Mutex, Semaphore};
 
-use crate::reporter::DownloadReporter;
+use crate::{
+    config::{AppConfig, MAX_PARALLELS_REQUESTS, RETRIES},
+    reporter::DownloadReporter,
+};
 
 use super::{DownloadTask, Downloader};
 
@@ -12,6 +19,8 @@ use super::{DownloadTask, Downloader};
 pub struct DownloaderBuilder {
     client: Option<Client>,
     tasks: Vec<DownloadTask>,
+    retries: usize, // TODO
+    parallel_requests: usize,
 }
 
 impl DownloaderBuilder {
@@ -19,21 +28,25 @@ impl DownloaderBuilder {
         Self {
             client: None,
             tasks: Vec::new(),
+            retries: RETRIES,
+            parallel_requests: MAX_PARALLELS_REQUESTS,
         }
     }
 
     /// Uses a custom http client
-    pub fn with_client(&mut self, client: Client) -> &mut Self {
+    pub fn with_client(mut self, client: Client) -> Self {
         self.client = Some(client);
         self
     }
 
-    pub fn with_timeout(self, timeout: u64) -> Self {
-        todo!()
+    pub fn with_retries(mut self, retries: usize) -> Self {
+        self.retries = retries;
+        self
     }
 
-    pub fn with_retries(self, retries: u8) -> Self {
-        todo!()
+    pub fn with_parallel_requests(mut self, count: usize) -> Self {
+        self.parallel_requests = count;
+        self
     }
 
     /// Adds a download task
@@ -50,6 +63,17 @@ impl DownloaderBuilder {
             overwrite,
             reporter,
         });
+        self
+    }
+
+    /// Adds multiple tasks from the iterator
+    pub fn add_tasks<I>(&mut self, tasks: I) -> &mut Self
+    where
+        I: IntoIterator<Item = (String, PathBuf, bool, Arc<Mutex<dyn DownloadReporter>>)>,
+    {
+        for (url, output, overwrite, reporter) in tasks {
+            self.add_task(&url, output, overwrite, reporter);
+        }
         self
     }
 
@@ -74,8 +98,17 @@ impl DownloaderBuilder {
         let downloader = Downloader {
             tasks: valid_tasks,
             client,
+            parallel_requests: Arc::new(Semaphore::new(self.parallel_requests)),
         };
 
         Ok((downloader, errors))
     }
+}
+
+pub fn build_client(config: &AppConfig) -> Result<Client> {
+    let builder = ClientBuilder::new();
+    Ok(builder
+        .timeout(Duration::from_secs(config.download.timeout_secs))
+        .connect_timeout(Duration::from_secs(config.download.connect_timeout_secs))
+        .build()?)
 }

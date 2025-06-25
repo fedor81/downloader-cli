@@ -5,19 +5,20 @@ use reqwest::{self, Client, Response};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
-pub use builder::DownloaderBuilder;
+use builder::DownloaderBuilder;
+use config::MAX_PARALLELS_REQUESTS;
+use reporter::DownloadReporter;
 
-use crate::reporter::DownloadReporter;
-
-mod builder;
+pub mod builder;
 pub mod config;
 pub mod reporter;
 
 pub struct Downloader {
     tasks: Vec<DownloadTask>,
     client: Client,
+    parallel_requests: Arc<Semaphore>,
 }
 
 #[derive(Clone)]
@@ -49,6 +50,7 @@ impl Downloader {
         Self {
             tasks: Vec::new(),
             client,
+            parallel_requests: Arc::new(Semaphore::new(MAX_PARALLELS_REQUESTS)),
         }
     }
 
@@ -65,6 +67,10 @@ impl Downloader {
         self.tasks.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
     /// Downloads files with resume support
     pub async fn resume_download(&self) -> DownloadResult {
         todo!()
@@ -72,13 +78,30 @@ impl Downloader {
 
     /// Downloads files asynchronously
     pub async fn download_all(&self) -> DownloadResult {
+        self.download_internal(self.tasks.iter().map(|t| t.clone())).await
+    }
+
+    /// Consumes all tasks and downloads them asynchronously
+    pub async fn download_all_consume(&mut self) -> DownloadResult {
+        let tasks = std::mem::take(&mut self.tasks);
+        self.download_internal(tasks.into_iter()).await
+    }
+
+    async fn download_internal<I>(&self, tasks: I) -> DownloadResult
+    where
+        I: IntoIterator<Item = DownloadTask> + ExactSizeIterator,
+    {
         let mut handles = tokio::task::JoinSet::new();
         let mut result = DownloadResult::new(self.task_count());
 
-        for task in &self.tasks {
+        for task in tasks {
             let client = self.client.clone();
-            let task = task.clone();
-            handles.spawn(async move { Self::download_file(&client, &task).await });
+            let permit = self.parallel_requests.clone().acquire_owned().await.unwrap();
+
+            handles.spawn(async move {
+                let _permit = permit; // Holding the permit until the task is completed
+                Self::download_file(&client, task).await
+            });
         }
 
         while let Some(res) = handles.join_next().await {
@@ -111,8 +134,13 @@ impl Downloader {
         reqwest::Url::parse(url).is_ok()
     }
 
-    async fn download_file(client: &Client, task: &DownloadTask) -> Result<()> {
+    async fn download_file(client: &Client, mut task: DownloadTask) -> Result<()> {
         // Preparation
+        if Self::handle_existing_file(&mut task).await? {
+            return Err(anyhow::anyhow!("File exists: {}", task.output.display())
+                .context("Use --overwrite to replace existing files"));
+        }
+
         {
             let mut reporter = task.reporter.lock().await;
             reporter.on_request(&task.url);
@@ -151,13 +179,8 @@ impl Downloader {
 
         task.reporter.lock().await.on_file_size_known(total_size);
 
-        if Self::handle_existing_file(task).await? {
-            return Err(anyhow::anyhow!("File exists: {}", task.output.display())
-                .context("Use --overwrite to replace existing files"));
-        }
-
         // Download
-        Self::download_stream(task, response).await?;
+        Self::download_stream(&task, response).await?;
         task.reporter.lock().await.on_complete(&task.url, &task.output);
         Ok(())
     }
@@ -191,8 +214,7 @@ impl Downloader {
     /// Checks the existence of a file and whether it can be written to.
     ///
     /// Returns `false` if the file exists and can be overwritten, and `true` otherwise.
-    async fn handle_existing_file(task: &DownloadTask) -> Result<bool> {
-        let output_display = task.output.display();
+    async fn handle_existing_file(task: &mut DownloadTask) -> Result<bool> {
         Ok(
             if tokio::fs::try_exists(&task.output)
                 .await
@@ -214,9 +236,11 @@ impl Downloader {
             },
         )
     }
+}
 
+impl DownloadTask {
     /// Try to get the filename from the URL
-    fn sanitize_filename(url: &str) -> String {
+    pub fn sanitize_filename(url: &str) -> String {
         const MAX_FILENAME_LENGTH: usize = 100;
 
         // Remove query and anchor parameters
@@ -246,44 +270,47 @@ impl Downloader {
 
 #[cfg(test)]
 mod tests {
-    use std::{ops::Deref, sync::Arc, time::Duration};
+    use std::{sync::Arc, time::Duration};
 
     use bytes::Bytes;
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use warp::Filter;
 
-    use crate::reporter::{ConsoleReporterFactory, ReporterFactory};
+    use crate::{
+        config::AppConfig,
+        reporter::{ConsoleReporterFactory, ReporterFactory},
+    };
 
     use super::*;
 
     #[test]
     fn test_get_filename() {
         assert_eq!(
-            Downloader::sanitize_filename("https://example.com/file.txt"),
+            DownloadTask::sanitize_filename("https://example.com/file.txt"),
             "file.txt"
         );
         assert_eq!(
-            Downloader::sanitize_filename("https://example.com/file.txt?param=value"),
+            DownloadTask::sanitize_filename("https://example.com/file.txt?param=value"),
             "file.txt"
         );
         assert_eq!(
-            Downloader::sanitize_filename("https://example.com/file.txt#fragment"),
+            DownloadTask::sanitize_filename("https://example.com/file.txt#fragment"),
             "file.txt"
         );
         assert_eq!(
-            Downloader::sanitize_filename("https://example.com/file.txt?param=value#fragment"),
+            DownloadTask::sanitize_filename("https://example.com/file.txt?param=value#fragment"),
             "file.txt"
         );
         assert_eq!(
-            Downloader::sanitize_filename("https://example.com/"),
+            DownloadTask::sanitize_filename("https://example.com/"),
             "example_com"
         );
         assert_eq!(
-            Downloader::sanitize_filename("https://example.com/page/1/"),
+            DownloadTask::sanitize_filename("https://example.com/page/1/"),
             "example_com_page_1"
         );
         assert_eq!(
-            Downloader::sanitize_filename("https://example.com/page/1/?param=value#fragment"),
+            DownloadTask::sanitize_filename("https://example.com/page/1/?param=value#fragment"),
             "example_com_page_1_param_value_fragment"
         );
     }
@@ -337,8 +364,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download() {
-        let use_content_length = true;
+    async fn test_download_content_length() {
+        test_download_helper(true).await;
+    }
+
+    #[tokio::test]
+    async fn test_download_no_content_length() {
+        test_download_helper(false).await;
+    }
+
+    async fn test_download_helper(use_content_length: bool) {
         let content = &[1u8; 1024];
         let filenames = [
             "file.txt",
@@ -358,8 +393,9 @@ mod tests {
         let (addr, server) = warp::serve(routes).bind_ephemeral(([127, 0, 0, 1], 0));
         tokio::spawn(server);
 
-        let mut builder = Downloader::builder();
-        let reporter_factory = ConsoleReporterFactory::new();
+        let config = AppConfig::load().unwrap();
+        let mut builder = DownloaderBuilder::from(&config);
+        let reporter_factory = ConsoleReporterFactory::new(&config.progress_bar, &config.output);
 
         for file in filenames {
             let url = format!("http://{}/{}", addr, file);

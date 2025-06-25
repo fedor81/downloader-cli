@@ -10,6 +10,11 @@ use serde::Deserialize;
 mod cli;
 pub use cli::{CliConfig, IntoOverwrite};
 
+use crate::builder::{DownloaderBuilder, build_client};
+
+pub const MAX_PARALLELS_REQUESTS: usize = 5;
+pub const RETRIES: usize = 3;
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
@@ -43,7 +48,7 @@ impl AppConfig {
     }
 
     fn validate(self) -> Result<Self> {
-        todo!()
+        Ok(self) // TODO
     }
 }
 
@@ -53,19 +58,26 @@ pub struct GeneralConfig {
     pub log_level: LogLevel,
 
     #[serde(default)]
-    pub config_path: Option<PathBuf>, // TODO
+    pub config_path: Option<PathBuf>,
 }
 
+// TODO: redirects, gzip, user_agent, http2, proxy, cookies
 #[derive(Debug, Deserialize)]
 pub struct DownloadConfig {
     #[serde(default = "DownloadConfig::default_timeout")]
     pub timeout_secs: u64,
 
+    #[serde(default = "DownloadConfig::default_connect_timeout")]
+    pub connect_timeout_secs: u64,
+
     #[serde(default = "DownloadConfig::default_retries")]
-    pub retries: u8,
+    pub retries: usize,
+
+    #[serde(default = "DownloadConfig::default_parallel_requests")]
+    pub parallel_requests: usize,
 
     #[serde(default)]
-    pub download_dir: Option<String>,
+    pub download_dir: Option<PathBuf>,
 }
 
 impl DownloadConfig {
@@ -73,7 +85,13 @@ impl DownloadConfig {
     fn default_timeout() -> u64 { 30 }
 
     #[rustfmt::skip]
-    fn default_retries() -> u8 { 3 }
+    fn default_retries() -> usize { RETRIES }
+
+    #[rustfmt::skip]
+    fn default_connect_timeout() -> u64 { 5 }
+
+    #[rustfmt::skip]
+    fn default_parallel_requests() -> usize { MAX_PARALLELS_REQUESTS }
 }
 
 impl Default for DownloadConfig {
@@ -82,6 +100,112 @@ impl Default for DownloadConfig {
             timeout_secs: Self::default_timeout(),
             retries: Self::default_retries(),
             download_dir: Default::default(),
+            connect_timeout_secs: Self::default_connect_timeout(),
+            parallel_requests: Self::default_parallel_requests(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct ProgressBarConfig {
+    #[serde(default = "default_true")]
+    pub enable: bool,
+
+    #[serde(default = "default_true")]
+    pub random: bool,
+
+    #[serde(default = "ProgressBarConfig::default_progress_bar_templates")]
+    pub progress_bar_templates: Vec<String>,
+
+    #[serde(default = "ProgressBarConfig::default_progress_bar_chars")]
+    pub progress_bar_chars: Vec<String>,
+
+    #[serde(default = "ProgressBarConfig::default_spinner_templates")]
+    pub spinner_templates: Vec<String>,
+
+    #[serde(default = "ProgressBarConfig::default_spinner_chars")]
+    pub spinner_chars: Vec<String>,
+}
+
+impl ProgressBarConfig {
+    pub fn default_progress_bar_templates() -> Vec<String> {
+        vec!["[{elapsed_precise}] {msg:20} {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})".to_string()]
+    }
+
+    pub fn default_progress_bar_chars() -> Vec<String> {
+        vec!["▓ ░".to_string()]
+    }
+
+    pub fn default_spinner_templates() -> Vec<String> {
+        vec!["{spinner:.green} [{elapsed_precise}] {msg:20} {bytes} ({bytes_per_sec})".to_string()]
+    }
+
+    pub fn default_spinner_chars() -> Vec<String> {
+        vec!["⠁⠂⠄⡀⢀⠠⠐⠈⠘⠰⠔⠑⠊ ".to_string()] // ▉▊▋▌▍▎▏▎▍▌▋▊▉ 🕐🕑🕒🕓🕔🕕🕖🕗🕘🕙🕚🕛
+    }
+}
+
+impl Default for ProgressBarConfig {
+    fn default() -> Self {
+        Self {
+            enable: default_true(),
+            random: default_true(),
+            progress_bar_templates: Self::default_progress_bar_templates(),
+            progress_bar_chars: Self::default_progress_bar_chars(),
+            spinner_templates: Self::default_spinner_templates(),
+            spinner_chars: Self::default_spinner_chars(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OutputConfig {
+    #[serde(default)]
+    pub message_on_request: Option<String>,
+
+    #[serde(default)]
+    pub message_on_response: Option<String>,
+
+    #[serde(default)]
+    pub message_on_file_exists: Option<String>,
+
+    #[serde(default)]
+    pub message_on_file_create: Option<String>,
+
+    #[serde(default)]
+    pub message_on_file_size_known: Option<String>,
+
+    #[serde(default)]
+    pub message_on_start_download: Option<String>,
+
+    #[serde(default)]
+    pub message_on_progress: Option<String>,
+
+    #[serde(default)]
+    pub message_on_complete: Option<String>,
+
+    #[serde(default)]
+    pub message_on_error: Option<String>,
+}
+
+impl OutputConfig {
+    pub fn default_message_before_request() -> Option<String> {
+        Some("Requesting information about {}".to_string())
+    }
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            message_on_request: Default::default(),
+            message_on_response: Default::default(),
+            message_on_file_exists: Default::default(),
+            message_on_file_create: Default::default(),
+            message_on_file_size_known: Default::default(),
+            message_on_start_download: Default::default(),
+            message_on_progress: Default::default(),
+            message_on_complete: Default::default(),
+            message_on_error: Default::default(),
         }
     }
 }
@@ -112,74 +236,6 @@ impl Default for LogLevel {
     fn default() -> Self {
         Self::All
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ProgressBarConfig {
-    #[serde(default = "default_true")]
-    pub enable: bool,
-
-    #[serde(default = "ProgressBarConfig::default_progress_bar_template")]
-    pub progress_bar_template: Option<Vec<String>>,
-
-    #[serde(default = "ProgressBarConfig::default_progress_bar_symbols")]
-    pub progress_bar_symbols: Option<Vec<String>>,
-
-    #[serde(default = "ProgressBarConfig::default_spinner_template")]
-    pub spinner_template: Option<Vec<String>>,
-
-    #[serde(default = "ProgressBarConfig::default_spinner_symbols")]
-    pub spinner_symbols: Option<Vec<String>>,
-}
-
-impl ProgressBarConfig {
-    pub fn default_progress_bar_template() -> Option<Vec<String>> {
-        Some(vec![
-            "{spinner:.green} {msg} [{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})"
-                .to_string(),
-        ])
-    }
-
-    pub fn default_progress_bar_symbols() -> Option<Vec<String>> {
-        Some(vec!["▓ ░".to_string()])
-    }
-
-    pub fn default_spinner_template() -> Option<Vec<String>> {
-        Some(vec![
-            "{spinner:.green} {msg} [{elapsed_precise}] {bytes} ({bytes_per_sec})".to_string(),
-        ])
-    }
-
-    pub fn default_spinner_symbols() -> Option<Vec<String>> {
-        Some(vec!["⠁⠂⠄⡀⢀⠠⠐⠈⠘⠰⠔⠑⠊ ".to_string()]) // ▉▊▋▌▍▎▏▎▍▌▋▊▉ 🕐🕑🕒🕓🕔🕕🕖🕗🕘🕙🕚🕛
-    }
-}
-
-impl Default for ProgressBarConfig {
-    fn default() -> Self {
-        Self {
-            enable: default_true(),
-            progress_bar_template: Self::default_progress_bar_template(),
-            progress_bar_symbols: Self::default_progress_bar_symbols(),
-            spinner_template: Self::default_progress_bar_template(),
-            spinner_symbols: Self::default_spinner_symbols(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub struct OutputConfig {
-    #[serde(default)]
-    pub message_before_start: Option<String>,
-
-    #[serde(default)]
-    pub message_after_success: Option<String>,
-
-    #[serde(default)]
-    pub message_after_error: Option<String>,
-
-    #[serde(default)]
-    pub message_after_completion: Option<String>,
 }
 
 #[rustfmt::skip]
@@ -305,6 +361,16 @@ where
     }
 }
 
+impl From<&AppConfig> for DownloaderBuilder {
+    fn from(value: &AppConfig) -> Self {
+        let client = build_client(&value).expect("Failed to build reqwest::Client from config");
+        Self::new()
+            .with_parallel_requests(value.download.parallel_requests)
+            .with_retries(value.download.retries)
+            .with_client(client)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,8 +384,8 @@ mod tests {
     fn test_custom_config_values() {
         let config_str = r#"
         [general]
-        silent = true
         log_level = "ErrorsOnly"
+        config_path = "/custom/path"
 
         [download]
         timeout_secs = 60
@@ -328,10 +394,10 @@ mod tests {
 
         let config: AppConfig = toml::from_str(config_str).unwrap();
 
+        assert_eq!(config.general.config_path, Some(PathBuf::from("/custom/path")));
         assert_eq!(config.general.log_level, LogLevel::ErrorsOnly);
         assert_eq!(config.download.timeout_secs, 60);
-        assert_eq!(config.download.download_dir, Some("/custom/path".to_string()));
-        assert_eq!(config.download.retries, 3);
+        assert_eq!(config.download.download_dir, Some("/custom/path".into()));
     }
 
     #[test]

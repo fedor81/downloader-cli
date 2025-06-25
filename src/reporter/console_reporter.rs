@@ -1,35 +1,41 @@
-use std::{path::Path, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
+use clap::builder::styling::Style;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::Response;
 
 use super::{DownloadReporter, ReporterFactory};
-use crate::config::AppConfig;
+use crate::config::{OutputConfig, ProgressBarConfig};
 
 #[derive(Debug, Clone)]
 pub struct ConsoleReporterFactory {
     multi_progress: MultiProgress,
+    progress_config: Arc<ProgressBarConfig>,
+    output_config: Arc<OutputConfig>,
 }
 
 impl ReporterFactory for ConsoleReporterFactory {
     fn create(&self) -> Self::Reporter {
-        ConsoleReporter::new(self.multi_progress.clone())
+        ConsoleReporter::new(
+            self.multi_progress.clone(),
+            Arc::from(self.progress_config.progress_bar_templates[0].as_str()),
+            Arc::from(self.progress_config.progress_bar_chars[0].as_str()),
+            Arc::from(self.progress_config.spinner_templates[0].as_str()),
+            Arc::from(self.progress_config.spinner_chars[0].as_str()),
+            self.output_config.clone(),
+        )
     }
 
     type Reporter = ConsoleReporter;
 }
 
 impl ConsoleReporterFactory {
-    pub fn new() -> Self {
+    pub fn new(progress_config: &ProgressBarConfig, output_config: &OutputConfig) -> Self {
         Self {
             multi_progress: MultiProgress::new(),
-        }
-    }
-
-    pub fn from_config(config: &AppConfig) -> Self {
-        Self {
-            multi_progress: MultiProgress::new(),
+            progress_config: Arc::new(progress_config.clone()),
+            output_config: Arc::new(output_config.clone()),
         }
     }
 }
@@ -39,14 +45,38 @@ pub struct ConsoleReporter {
     multi_progress: MultiProgress,
     progress_bar: Option<ProgressBar>,
     file_size: Option<u64>,
+
+    progress_bar_template: Arc<str>,
+    progress_bar_chars: Arc<str>,
+    spinner_template: Arc<str>,
+    spinner_chars: Arc<str>,
+    output_config: Arc<OutputConfig>,
 }
 
 impl ConsoleReporter {
-    fn new(multi_progress: MultiProgress) -> Self {
+    fn new(
+        multi_progress: MultiProgress,
+        progress_bar_template: Arc<str>,
+        progress_bar_chars: Arc<str>,
+        spinner_template: Arc<str>,
+        spinner_chars: Arc<str>,
+        output_config: Arc<OutputConfig>,
+    ) -> Self {
         Self {
             multi_progress,
             progress_bar: None,
             file_size: None,
+            progress_bar_template,
+            progress_bar_chars,
+            spinner_template,
+            spinner_chars,
+            output_config,
+        }
+    }
+
+    fn println(message: &Option<String>) {
+        if let Some(message) = message {
+            println!("{}", message);
         }
     }
 
@@ -66,9 +96,16 @@ impl ConsoleReporter {
 impl DownloadReporter for ConsoleReporter {
     /// Create progress bar for request
     fn on_request(&mut self, url: &str) {
-        let pb = self
-            .multi_progress
-            .add(ProgressBar::new_spinner().with_message(format!("Requesting information about {}", url)));
+        let pb = self.multi_progress.add(
+            ProgressBar::new_spinner()
+                .with_style(
+                    // TODO: Save style in struct ??
+                    ProgressStyle::with_template(&self.spinner_template)
+                        .unwrap()
+                        .tick_chars(&self.spinner_chars),
+                )
+                .with_message(format!("Requesting information about {}", url)),
+        );
         pb.enable_steady_tick(Duration::from_millis(100));
         self.progress_bar.replace(pb);
     }
@@ -77,6 +114,7 @@ impl DownloadReporter for ConsoleReporter {
         if let Some(pb) = &self.progress_bar {
             pb.finish_and_clear()
         }
+        Self::println(&self.output_config.message_on_response);
     }
 
     fn on_file_exists(&mut self, path: &Path, overwrite: bool) {
@@ -90,6 +128,7 @@ impl DownloadReporter for ConsoleReporter {
             pb.finish();
             self.progress_bar = None
         }
+        Self::println(&self.output_config.message_on_complete);
     }
 
     fn on_error(&mut self, error: &anyhow::Error) {
@@ -122,20 +161,15 @@ impl DownloadReporter for ConsoleReporter {
         if let Some(size) = self.file_size {
             pb.set_length(size);
             pb.set_style(
-                ProgressStyle::default_bar()
-                    // .template("{msg} [{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})")
-                    .template(
-                        "{msg:20} [{elapsed_precise}] {bar:40.cyan/blue} {bytes:>8}/{total_bytes:8} ({eta})",
-                    )
+                ProgressStyle::with_template(&self.progress_bar_template)
                     .unwrap()
-                    .progress_chars("▓ ░"),
+                    .progress_chars(&self.progress_bar_chars),
             );
         } else {
             pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("{spinner:.green} {msg} [{elapsed_precise}] {bytes} ({bytes_per_sec})")
+                ProgressStyle::with_template(&self.spinner_template)
                     .unwrap()
-                    .progress_chars("⠁⠂⠄⡀⢀⠠⠐⠈⠘⠰⠔⠑⠊ "),
+                    .tick_chars(&self.spinner_chars),
             );
         }
         self.progress_bar = Some(pb);

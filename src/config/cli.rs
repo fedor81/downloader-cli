@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 
 use crate::config::{AppConfig, LogLevel};
@@ -12,13 +14,13 @@ pub struct CliConfig {
     pub source: String,
 
     /// Target filepath (existing directories will be treated as the target location)
-    pub target: Option<String>,
+    pub target: Option<PathBuf>,
 
     /// Silent mode
     #[arg(short, long)]
     pub silent: bool,
 
-    /// Resume failed or cancelled download (partial sanity check)
+    /// Resume failed or cancelled download (partial sanity check) NOT IMPLEMENTED
     #[arg(short, long)]
     pub resume: bool,
 
