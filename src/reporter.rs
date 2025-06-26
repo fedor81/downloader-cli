@@ -1,9 +1,8 @@
 use std::path::Path;
 
-pub use console_reporter::{ConsoleReporter, ConsoleReporterFactory};
-
-mod console_reporter;
-mod silent_reporter;
+pub mod console_reporter;
+pub mod program_flow;
+pub mod silent_reporter;
 
 pub trait DownloadReporter: Send + Sync {
     fn on_request(&mut self, url: &str);
@@ -20,4 +19,11 @@ pub trait DownloadReporter: Send + Sync {
 pub trait ReporterFactory {
     type Reporter: DownloadReporter;
     fn create(&self) -> Self::Reporter;
+}
+
+pub trait ProgramFlowReporter {
+    fn on_start(&mut self);
+    fn on_finish(&mut self);
+    fn on_errors(&mut self, errors: Vec<anyhow::Error>);
+    fn on_success(&mut self);
 }

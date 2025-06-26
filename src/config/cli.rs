@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use crate::config::{AppConfig, LogLevel};
+use crate::config::app::{AppConfig, LogLevel, TomlConfig};
+
+use super::app;
 
 /// # Important
 /// It is important to avoid adding the same boolean type fields to both
@@ -20,7 +22,7 @@ pub struct CliConfig {
     #[arg(short, long)]
     pub silent: bool,
 
-    /// Resume failed or cancelled download (partial sanity check) NOT IMPLEMENTED
+    /// [NOT IMPLEMENTED] Resume failed or cancelled download (partial sanity check)
     #[arg(short, long)]
     pub resume: bool,
 
@@ -43,8 +45,8 @@ pub trait IntoOverwrite<T> {
     fn into_overwrite<'a, 'b>(&'a self, target: &'b mut T) -> &'b mut T;
 }
 
-impl IntoOverwrite<AppConfig> for CliConfig {
-    fn into_overwrite<'a, 'b>(&'a self, target: &'b mut AppConfig) -> &'b mut AppConfig {
+impl IntoOverwrite<TomlConfig> for CliConfig {
+    fn into_overwrite<'a, 'b>(&'a self, target: &'b mut TomlConfig) -> &'b mut TomlConfig {
         if self.silent {
             target.general.log_level = LogLevel::Silent;
         }

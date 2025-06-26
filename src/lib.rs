@@ -8,7 +8,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, Semaphore};
 
 use builder::DownloaderBuilder;
-use config::MAX_PARALLELS_REQUESTS;
+use config::app::MAX_PARALLELS_REQUESTS;
 use reporter::DownloadReporter;
 
 pub mod builder;
@@ -138,7 +138,7 @@ impl Downloader {
         // Preparation
         if Self::handle_existing_file(&mut task).await? {
             return Err(anyhow::anyhow!("File exists: {}", task.output.display())
-                .context("Use --overwrite to replace existing files"));
+                .context("Use -f --force to replace existing files"));
         }
 
         {
@@ -277,8 +277,8 @@ mod tests {
     use warp::Filter;
 
     use crate::{
-        config::AppConfig,
-        reporter::{ConsoleReporterFactory, ReporterFactory},
+        config::{Config, app::AppConfig},
+        reporter::{ReporterFactory, console_reporter::ConsoleReporterFactory},
     };
 
     use super::*;

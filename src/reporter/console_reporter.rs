@@ -1,14 +1,14 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use clap::builder::styling::Style;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use rand::{self, seq::IndexedRandom};
 use reqwest::Response;
 
 use super::{DownloadReporter, ReporterFactory};
-use crate::config::{OutputConfig, ProgressBarConfig};
+use crate::config::app::{OutputConfig, ProgressBarConfig};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConsoleReporterFactory {
     multi_progress: MultiProgress,
     progress_config: Arc<ProgressBarConfig>,
@@ -17,12 +17,17 @@ pub struct ConsoleReporterFactory {
 
 impl ReporterFactory for ConsoleReporterFactory {
     fn create(&self) -> Self::Reporter {
+        let mut rng = rand::rng();
+
         ConsoleReporter::new(
             self.multi_progress.clone(),
-            Arc::from(self.progress_config.progress_bar_templates[0].as_str()),
-            Arc::from(self.progress_config.progress_bar_chars[0].as_str()),
-            Arc::from(self.progress_config.spinner_templates[0].as_str()),
-            Arc::from(self.progress_config.spinner_chars[0].as_str()),
+            self.progress_config.max_displayed_filename,
+            Self::choose_or_empty(&self.progress_config.progress_bar_templates, &mut rng),
+            Self::choose_or_empty(&self.progress_config.progress_bar_chars, &mut rng),
+            Self::choose_or_empty(&self.progress_config.spinner_templates, &mut rng),
+            Self::choose_or_empty(&self.progress_config.spinner_chars, &mut rng),
+            Self::choose_or_empty(&self.progress_config.request_spinner_templates, &mut rng),
+            Self::choose_or_empty(&self.progress_config.request_spinner_chars, &mut rng),
             self.output_config.clone(),
         )
     }
@@ -38,6 +43,10 @@ impl ConsoleReporterFactory {
             output_config: Arc::new(output_config.clone()),
         }
     }
+
+    fn choose_or_empty<T: rand::Rng>(choices: &[String], rng: &mut T) -> Arc<str> {
+        Arc::from(choices.choose(rng).unwrap_or(&"".to_string()).as_str())
+    }
 }
 
 #[derive(Debug)]
@@ -45,25 +54,33 @@ pub struct ConsoleReporter {
     multi_progress: MultiProgress,
     progress_bar: Option<ProgressBar>,
     file_size: Option<u64>,
+    max_displayed_filename: usize,
+    output_config: Arc<OutputConfig>,
 
+    // Templates and chars
     progress_bar_template: Arc<str>,
     progress_bar_chars: Arc<str>,
     spinner_template: Arc<str>,
     spinner_chars: Arc<str>,
-    output_config: Arc<OutputConfig>,
+    request_spinner_template: Arc<str>,
+    request_spinner_chars: Arc<str>,
 }
 
 impl ConsoleReporter {
     fn new(
         multi_progress: MultiProgress,
+        max_displayed_filename: usize,
         progress_bar_template: Arc<str>,
         progress_bar_chars: Arc<str>,
         spinner_template: Arc<str>,
         spinner_chars: Arc<str>,
+        request_spinner_template: Arc<str>,
+        request_spinner_chars: Arc<str>,
         output_config: Arc<OutputConfig>,
     ) -> Self {
         Self {
             multi_progress,
+            max_displayed_filename,
             progress_bar: None,
             file_size: None,
             progress_bar_template,
@@ -71,6 +88,8 @@ impl ConsoleReporter {
             spinner_template,
             spinner_chars,
             output_config,
+            request_spinner_template,
+            request_spinner_chars,
         }
     }
 
@@ -80,15 +99,18 @@ impl ConsoleReporter {
         }
     }
 
-    fn shorten_filename(file: &Path) -> String {
-        let max_length = 20; // TODO: Move to config
+    fn shorten_filename(&self, file: &Path) -> String {
         let name = file.file_name().unwrap().to_string_lossy().to_string();
 
-        if name.len() <= max_length {
+        if name.len() <= self.max_displayed_filename {
             name
         } else {
             let extension = file.extension().unwrap_or_default().to_string_lossy().to_string();
-            format!("{}…{}", &name[0..max_length - extension.len() - 1], extension)
+            format!(
+                "{}…{}",
+                &name[0..self.max_displayed_filename - extension.len() - 1],
+                extension
+            )
         }
     }
 }
@@ -99,10 +121,10 @@ impl DownloadReporter for ConsoleReporter {
         let pb = self.multi_progress.add(
             ProgressBar::new_spinner()
                 .with_style(
-                    // TODO: Save style in struct ??
-                    ProgressStyle::with_template(&self.spinner_template)
+                    // TODO: Save styles in struct ??
+                    ProgressStyle::with_template(&self.request_spinner_template)
                         .unwrap()
-                        .tick_chars(&self.spinner_chars),
+                        .tick_chars(&self.request_spinner_chars),
                 )
                 .with_message(format!("Requesting information about {}", url)),
         );
@@ -128,7 +150,6 @@ impl DownloadReporter for ConsoleReporter {
             pb.finish();
             self.progress_bar = None
         }
-        Self::println(&self.output_config.message_on_complete);
     }
 
     fn on_error(&mut self, error: &anyhow::Error) {
@@ -155,23 +176,22 @@ impl DownloadReporter for ConsoleReporter {
 
     /// Setup progress bar for download
     fn on_start_download(&mut self, url: &str, file: &Path) {
-        let pb = self.multi_progress.add(ProgressBar::no_length());
-        pb.set_message(Self::shorten_filename(file));
-
-        if let Some(size) = self.file_size {
-            pb.set_length(size);
-            pb.set_style(
+        let pb = if let Some(size) = self.file_size {
+            ProgressBar::new(size).with_style(
                 ProgressStyle::with_template(&self.progress_bar_template)
                     .unwrap()
                     .progress_chars(&self.progress_bar_chars),
-            );
+            )
         } else {
-            pb.set_style(
+            ProgressBar::new_spinner().with_style(
                 ProgressStyle::with_template(&self.spinner_template)
                     .unwrap()
                     .tick_chars(&self.spinner_chars),
-            );
+            )
         }
+        .with_message(self.shorten_filename(file));
+
+        let pb = self.multi_progress.add(pb);
         self.progress_bar = Some(pb);
     }
 }

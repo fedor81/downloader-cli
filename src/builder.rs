@@ -9,7 +9,7 @@ use reqwest::{Client, ClientBuilder};
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::{
-    config::{AppConfig, MAX_PARALLELS_REQUESTS, RETRIES},
+    config::app::{AppConfig, MAX_PARALLELS_REQUESTS, RETRIES},
     reporter::DownloadReporter,
 };
 
@@ -111,4 +111,14 @@ pub fn build_client(config: &AppConfig) -> Result<Client> {
         .timeout(Duration::from_secs(config.download.timeout_secs))
         .connect_timeout(Duration::from_secs(config.download.connect_timeout_secs))
         .build()?)
+}
+
+impl From<&AppConfig> for DownloaderBuilder {
+    fn from(value: &AppConfig) -> Self {
+        let client = build_client(&value).expect("Failed to build reqwest::Client from config");
+        Self::new()
+            .with_parallel_requests(value.download.parallel_requests)
+            .with_retries(value.download.retries)
+            .with_client(client)
+    }
 }

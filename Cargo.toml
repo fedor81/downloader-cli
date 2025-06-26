@@ -9,6 +9,7 @@ clap = { version = "4.5.40", features = ["derive"] }
 directories = "6.0.0"
 futures = "0.3.31"
 indicatif = "0.17.11"
+rand = "0.9.1"
 regex = "1.11.1"
 reqwest = { version = "0.12", features = ["stream"] }
 serde = { version = "1.0.219", features = ["derive"] }
@@ -18,5 +19,4 @@ toml = "0.8.23"
 [dev-dependencies]
 bytes = "1.10.1"
 ctrlc = "3.4.7"
-rand = "0.9.1"
 warp = "0.3.7"

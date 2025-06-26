@@ -1,6 +1,6 @@
 use super::{DownloadReporter, ReporterFactory};
 
-struct SilentReporterFactory;
+pub struct SilentReporterFactory;
 
 impl ReporterFactory for SilentReporterFactory {
     fn create(&self) -> Self::Reporter {
@@ -9,7 +9,7 @@ impl ReporterFactory for SilentReporterFactory {
     type Reporter = SilentReporter;
 }
 
-struct SilentReporter;
+pub struct SilentReporter;
 
 impl DownloadReporter for SilentReporter {
     fn on_request(&mut self, url: &str) {}

@@ -11,29 +11,34 @@ use tokio::sync::Mutex;
 
 use downloader_cli::{
     DownloadResult, DownloadTask, Downloader,
-    builder::{DownloaderBuilder, build_client},
-    config::{AppConfig, CliConfig, IntoOverwrite, LogLevel},
-    reporter::{ConsoleReporterFactory, DownloadReporter, ReporterFactory},
+    builder::DownloaderBuilder,
+    config::{CliConfig, LogLevel, load_config},
+    reporter::{
+        DownloadReporter, ProgramFlowReporter, ReporterFactory, console_reporter::ConsoleReporterFactory,
+        program_flow::ProgramReporter,
+    },
 };
+
+type AppConfig = downloader_cli::config::app::AppConfig;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = CliConfig::parse();
-    let mut config = load_config(&args)?;
-    args.into_overwrite(&mut config);
+    let config = load_config(&args)?;
     run(args, config).await
 }
 
 async fn run(args: CliConfig, config: AppConfig) -> anyhow::Result<()> {
-    // Initializing the reporter based on the config
+    // Initializing reporters based on the config
+    let mut program_reporter = ProgramReporter::from(&config);
     let reporter_factory = ConsoleReporterFactory::new(&config.progress_bar, &config.output);
-
     let downloader = build_downloader(&args, &config, reporter_factory)?;
+
+    program_reporter.on_start();
 
     // Performing the download
     let result = execute_download(downloader, args.resume).await;
-
-    handle_result(result, &config)
+    handle_result(result, &config, &mut program_reporter)
 }
 
 async fn execute_download(mut downloader: Downloader, resume: bool) -> DownloadResult {
@@ -44,7 +49,11 @@ async fn execute_download(mut downloader: Downloader, resume: bool) -> DownloadR
     }
 }
 
-fn handle_result(result: DownloadResult, config: &AppConfig) -> anyhow::Result<()> {
+fn handle_result<T: ProgramFlowReporter>(
+    result: DownloadResult,
+    config: &AppConfig,
+    program_reporter: &mut T,
+) -> anyhow::Result<()> {
     if !result.errors.is_empty() {
         print_errors("Download errors", &result.errors, config.general.log_level);
 
@@ -56,25 +65,12 @@ fn handle_result(result: DownloadResult, config: &AppConfig) -> anyhow::Result<(
     }
 
     if config.general.log_level.show_success() {
-        println!("\nAll files downloaded successfully!");
+        program_reporter.on_success();
     }
+
+    program_reporter.on_finish();
 
     Ok(())
-}
-
-pub fn load_config(args: &CliConfig) -> anyhow::Result<AppConfig> {
-    let mut config = if let Some(config_path) = &args.config {
-        AppConfig::load_from_path(config_path)?
-    } else {
-        AppConfig::load()?
-    };
-
-    if let Some(another_config) = config.general.config_path {
-        config = AppConfig::load_from_path(another_config)?;
-    }
-
-    args.into_overwrite(&mut config);
-    Ok(config)
 }
 
 fn build_downloader<F>(args: &CliConfig, config: &AppConfig, factory: F) -> Result<Downloader>
@@ -155,18 +151,10 @@ where
 
 /// Prints errors based on silent mode
 fn print_errors(title: &str, errors: &[anyhow::Error], log_level: LogLevel) {
-    if errors.is_empty() || !log_level.show_errors() {
-        return;
-    }
+    if !errors.is_empty() && log_level.show_errors() {
+        eprintln!("{} ({}):", title, errors.len());
 
-    eprintln!("{} ({}):", title, errors.len());
-    if errors.len() <= 5 {
         for err in errors {
-            eprintln!("  - {}", err);
-        }
-    } else {
-        eprintln!("  ... showing first 5 of {} errors ...", errors.len());
-        for err in errors.into_iter().take(5) {
             eprintln!("  - {}", err);
         }
     }
