@@ -26,7 +26,7 @@ pub struct DownloadTask {
     pub url: String,
     pub output: PathBuf,
     pub overwrite: bool,
-    pub reporter: Arc<Mutex<dyn DownloadReporter>>, // TODO: Option<...>
+    pub reporter: Arc<Mutex<dyn DownloadReporter>>, // TODO: Wrap a parameter in a Option<T>
 }
 
 #[derive(Debug)]
@@ -347,7 +347,7 @@ mod tests {
 
     fn create_response(content: &'static [u8], use_content_length: bool) -> warp::reply::Response {
         let chunk_size = rand::random_range(10..20);
-        let response_delay = Duration::from_millis(rand::random_range(500..3000));
+        let response_delay = Duration::from_millis(rand::random_range(500..2000));
 
         let stream = create_realistic_stream(content, chunk_size);
         let mut reply = warp::reply::Response::new(warp::hyper::Body::wrap_stream(stream));
@@ -378,9 +378,13 @@ mod tests {
         let filenames = [
             "file.txt",
             "test.txt",
+            "crate.txt",
             "error.txt",
             "super.txt",
-            "a_very_long_name_for_the_download_file_for_the_test.txt",
+            "cargo.txt",
+            "hello.txt",
+            "banana.txt",
+            // "a_very_long_name_for_the_download_file_for_the_test.txt",
         ];
 
         let routes = warp::path(filenames[0])
@@ -388,7 +392,10 @@ mod tests {
             .or(warp::path(filenames[1]).map(move || create_response(content, use_content_length)))
             .or(warp::path(filenames[2]).map(move || create_response(content, use_content_length)))
             .or(warp::path(filenames[3]).map(move || create_response(content, use_content_length)))
-            .or(warp::path(filenames[4]).map(move || create_response(content, use_content_length)));
+            .or(warp::path(filenames[4]).map(move || create_response(content, use_content_length)))
+            .or(warp::path(filenames[5]).map(move || create_response(content, use_content_length)))
+            .or(warp::path(filenames[6]).map(move || create_response(content, use_content_length)))
+            .or(warp::path(filenames[7]).map(move || create_response(content, use_content_length)));
 
         let (addr, server) = warp::serve(routes).bind_ephemeral(([127, 0, 0, 1], 0));
         tokio::spawn(server);
@@ -422,10 +429,10 @@ mod tests {
         let (downloader, errors) = builder.build().unwrap();
         let result = downloader.download_all().await;
 
-        assert_eq!(result.errors.len(), 0, "Download failed: {:#?}", result);
-
         for file in filenames {
             std::fs::remove_file(&file).ok();
         }
+
+        assert_eq!(result.errors.len(), 0, "Download failed: {:#?}", result);
     }
 }

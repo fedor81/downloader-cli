@@ -1,0 +1,73 @@
+[progress_bar]
+spinner_chars = [
+  "▉▊▋▌▍▎▏▎▍▌▋▊▉",
+  "⠁⠂⠄⡀⢀⠠⠐⠈ ",
+  "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ ",
+  "⣾⣽⣻⢿⡿⣟⣯⣷ ",
+  "◐◓◑◒",
+  "▁▂▃▄▅▆▇█▇▆▅▄▃▂",
+  "🌑🌒🌓🌔🌕🌖🌗🌘",
+  "🕛🕐🕑🕒🕓🕔🕕🕖🕗🕘🕙🕚",
+  "▖▘▝▗",
+  "┤┘┴└├┌┬┐",
+  "◢◣◤◥",
+  ".oO°Oo.",
+  "-\\|/",
+  "←↖↑↗→↘↓↙",
+  "▯▮▯▮",
+  "⠄⠆⠇⠋⠙⠸⠰⠠⠰⠸⠙⠋⠇⠆",
+  "☀️🌤️⛅🌥️☁️🌦️🌧️⛈️"
+]
+progress_bar_chars = [
+  "█▓▒░ ",
+  "█▉▊▋▌▍▎▏ ",
+  "🬀🬁🬂🬃🬄🬅🬆🬇🬈🬉🬊🬋🬌🬍🬎🬏▏",
+  "█🮇🮈🮉▌ ",
+  "━╺",
+  "═╌",
+  "─╴",
+  "⚪⚫",
+  "▰▱",
+  "🭶🭷🭸🭹🭺🭻",
+]
+spinner_templates = [
+  "{spinner:.blue} {msg} | {elapsed} | {bytes}/{total_bytes}",
+  "{spinner:.green} {msg:15} {bytes_per_sec:12} | ⏳ {eta}",
+  "{spinner:.yellow} {msg} | {elapsed_precise}",
+  "{spinner:.cyan} {human_pos:>7}/{human_len:<7} | {binary_bytes_per_sec}/s",
+  "{spinner:.red} [{elapsed}] {prefix:10} {bytes:9} ({per_sec} it/s)",
+  "{spinner:.magenta} {msg} | 🚀",
+
+]
+progress_bar_templates = [
+  "[{elapsed_precise}] {msg:10} {bar:40.cyan/blue} {bytes}/{total_bytes} ({eta})",
+  "⏳ {msg:10} {spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {bytes}/{total_bytes}",
+  "🛠️ {msg:20} │{bar:40.red/yellow}│ {bytes}/{total_bytes} ({eta})",
+  "📦 {msg:20} {bar:40.green/yellow} {bytes}/{total_bytes} ⏳{eta}",
+  "✨ {msg:20} ▕{bar:40.magenta/cyan}▏ {bytes}/{total_bytes} ({eta})",
+  "{spinner:.green} {msg:20} {bar:40} {bytes}/{total_bytes} ({eta})",
+  "🚀 {msg:20} ┃{bar:40.blue/green}┃ {bytes}/{total_bytes} ⏱️{elapsed}",
+  "⏱️ {elapsed_precise} {msg:10} {bar:40} {bytes}/{total_bytes}",
+  "{msg:20} {bar:40} {bytes}/{total_bytes}",
+  "🌈 {msg:20} ║{bar:40.cyan/purple}║ {bytes}/{total_bytes} 🕑{eta}",
+  "🚀 {msg:20!} {bar:28.cyan/blue} {bytes:>9} / {total_bytes:9} | {binary_bytes_per_sec:12} | ⏱️ {eta_precise:8}",
+  "{spinner:.green} {msg:17} {bar:30.red/yellow} {percent_precise:5}% | {bytes:9} | {eta:4}",
+  "📦 {msg:20} {wide_bar:20} {human_pos:>7}/{human_len:<7} ({eta})",
+  "⬇️ {bytes:9} @ {binary_bytes_per_sec:9}/s | ETA: {eta_precise:8} | {bar:20.magenta/cyan}",
+  "🕹️ {msg:20} ▐{bar:20.green/black}▌ {percent:3}% | {elapsed:4} > {eta:4}",
+  "🧮 {bar:40} {bytes}/{total_bytes} | {per_sec:6} it/s | ⏳ {duration_precise}"
+]
+request_spinner_templates = [
+  "{spinner} {msg}",
+  "{spinner} {msg:.red}",
+  "{spinner} {msg:.blue}",
+  "{spinner} {msg:.green}",
+  "{spinner} {msg:.gray}",
+  "{spinner} {msg:.yellow}",
+  "{spinner} {msg:.magenta}",
+  "{spinner} {msg:.cyan}",
+  "{spinner} {msg:.white}"
+]
+
+[download]
+parallel_requests = 16

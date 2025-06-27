@@ -27,7 +27,13 @@ impl ReporterFactory for ConsoleReporterFactory {
             Self::choose_or_empty(&self.progress_config.spinner_templates, &mut rng),
             Self::choose_or_empty(&self.progress_config.spinner_chars, &mut rng),
             Self::choose_or_empty(&self.progress_config.request_spinner_templates, &mut rng),
-            Self::choose_or_empty(&self.progress_config.request_spinner_chars, &mut rng),
+            Self::choose_or_empty(
+                self.progress_config
+                    .request_spinner_chars
+                    .as_ref()
+                    .unwrap_or(&self.progress_config.spinner_chars),
+                &mut rng,
+            ),
             self.output_config.clone(),
         )
     }
@@ -121,7 +127,7 @@ impl DownloadReporter for ConsoleReporter {
         let pb = self.multi_progress.add(
             ProgressBar::new_spinner()
                 .with_style(
-                    // TODO: Save styles in struct ??
+                    // TODO: Should the styles be kept in the structure?
                     ProgressStyle::with_template(&self.request_spinner_template)
                         .unwrap()
                         .tick_chars(&self.request_spinner_chars),

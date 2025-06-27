@@ -27,7 +27,7 @@ impl ProgramFlowReporter for ProgramReporter {
     }
 
     fn on_errors(&mut self, errors: Vec<anyhow::Error>) {
-        todo!()
+        // TODO: Unimplemented
     }
 
     fn on_success(&mut self) {

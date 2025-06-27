@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{Config, load_config_from_path, load_config_internal};
 
@@ -40,7 +40,7 @@ impl From<TomlConfig> for AppConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TomlConfig {
     #[serde(default)]
@@ -75,11 +75,11 @@ impl TomlConfig {
     }
 
     fn validate(self) -> Result<Self> {
-        Ok(self) // TODO
+        Ok(self) // TODO: Implement config validation
     }
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GeneralConfig {
     #[serde(default)]
@@ -89,8 +89,8 @@ pub struct GeneralConfig {
     pub config_path: Option<PathBuf>,
 }
 
-// TODO: redirects, gzip, user_agent, http2, proxy, cookies
-#[derive(Debug, Deserialize)]
+// TODO: The following parameters can be added: redirects, gzip, user_agent, http2, proxy, cookies
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DownloadConfig {
     #[serde(default = "DownloadConfig::default_timeout")]
@@ -135,7 +135,7 @@ impl Default for DownloadConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ProgressBarConfig {
     #[serde(default = "default_true")]
@@ -159,8 +159,8 @@ pub struct ProgressBarConfig {
     #[serde(default = "ProgressBarConfig::default_request_spinner_templates")]
     pub request_spinner_templates: Vec<String>,
 
-    #[serde(default = "ProgressBarConfig::default_spinner_chars")]
-    pub request_spinner_chars: Vec<String>,
+    #[serde(default)]
+    pub request_spinner_chars: Option<Vec<String>>,
 }
 
 impl ProgressBarConfig {
@@ -197,13 +197,13 @@ impl Default for ProgressBarConfig {
             spinner_templates: Self::default_spinner_templates(),
             spinner_chars: Self::default_spinner_chars(),
             request_spinner_templates: Self::default_request_spinner_templates(),
-            request_spinner_chars: Self::default_spinner_chars(),
+            request_spinner_chars: Default::default(),
             max_displayed_filename: Self::default_max_displayed_filename(),
         }
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct OutputConfig {
     #[serde(default)]
@@ -215,7 +215,7 @@ pub struct OutputConfig {
     #[serde(default = "OutputConfig::default_message_on_success")]
     pub message_on_success: Option<String>,
 
-    #[serde(default = "OutputConfig::default_message_on_finish")]
+    #[serde(default)]
     pub message_on_finish: Option<String>,
 
     #[serde(default)]
@@ -242,10 +242,6 @@ impl OutputConfig {
         Some("Requesting information about {}".to_string())
     }
 
-    pub fn default_message_on_finish() -> Option<String> {
-        Some("Finish!".to_owned())
-    }
-
     fn default_message_on_success() -> Option<String> {
         Some("\nAll files downloaded successfully!".to_owned())
     }
@@ -263,7 +259,7 @@ impl Default for OutputConfig {
             message_on_success: Self::default_message_on_success(),
             message_on_start: Default::default(),
             message_on_errors: Default::default(),
-            message_on_finish: Self::default_message_on_finish(),
+            message_on_finish: Default::default(),
         }
     }
 }
@@ -274,7 +270,7 @@ pub enum ProgressBarType {
     ProgressBar,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
     All,
     ErrorsOnly,
@@ -343,5 +339,8 @@ mod tests {
     fn test_default_config() {
         let config: TomlConfig = toml::from_str("").unwrap();
         println!("Config: {:#?}", config);
+
+        let config = toml::to_string(&config).unwrap();
+        println!("{}", config);
     }
 }

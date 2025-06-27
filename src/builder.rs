@@ -19,7 +19,7 @@ use super::{DownloadTask, Downloader};
 pub struct DownloaderBuilder {
     client: Option<Client>,
     tasks: Vec<DownloadTask>,
-    retries: usize, // TODO
+    retries: usize, // TODO: The retries feature isn't implemented yet
     parallel_requests: usize,
 }
 

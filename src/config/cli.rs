@@ -6,9 +6,9 @@ use crate::config::app::{AppConfig, LogLevel, TomlConfig};
 
 use super::app;
 
-/// # Important
-/// It is important to avoid adding the same boolean type fields to both
-/// the Cli and App Configs, as this can cause problems when merging them.
+// # Important
+// It is important to avoid adding the same boolean type fields to both
+// the Cli and App Configs, as this can cause problems when merging them.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct CliConfig {
@@ -34,8 +34,7 @@ pub struct CliConfig {
     #[arg(short, long)]
     pub force: bool,
     //
-    //
-    // UI
+    // TODO: Add UI arguments to Cli
     //
 }
 
